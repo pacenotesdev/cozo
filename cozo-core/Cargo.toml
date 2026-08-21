@@ -34,6 +34,9 @@ storage-sqlite-src = ["dep:sqlite3-src", "sqlite3-src/bundled"]
 ## You can also [fine-tune](https://github.com/cozodb/cozo/blob/main/TUNING_ROCKSDB.md) RocksDB options.
 storage-rocksdb = ["dep:cozorocks"]
 storage-new-rocksdb = ["dep:rocksdb"]
+## Enables the layered RocksDB backend: named storage layers composed into a stack per query,
+## for copy-on-write forks of a database. See `plans/cozo-layered-storage-spec.md`.
+storage-layered = ["dep:rocksdb"]
 ## Enables the graph algorithms.
 graph-algo = ["graph", "rayon"]
 ## Allows the utilities to make web requests to fetch data.
@@ -97,9 +100,7 @@ serde_json = "1.0.116"
 serde = { version = "1.0.199" }
 serde_derive = "1.0.199"
 serde_bytes = "0.11.14"
-rmp = "0.8.14"
 rmp-serde = "1.2.0"
-rmpv = "1.0.2"
 base64 = "0.22.0"
 chrono = "0.4.38"
 chrono-tz = "0.9.0"

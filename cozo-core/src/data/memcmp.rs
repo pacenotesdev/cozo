@@ -37,6 +37,98 @@ const BOT_TAG: u8 = 0xFF;
 const VEC_F32: u8 = 0x01;
 const VEC_F64: u8 = 0x02;
 
+/// The encoded width of a [`DataValue::Validity`]: tag byte, order-encoded timestamp,
+/// assertion byte.
+pub(crate) const VLD_ENCODED_LEN: usize = 1 + 8 + 1;
+
+/// Read the validity that terminates an encoded key, if the key ends in one.
+///
+/// This is a byte-level probe rather than a decode: it recognises the fixed ten-byte
+/// tail that [`MemCmpEncoder::encode_datavalue`] writes for a validity. A key whose final
+/// component is *not* a validity can in principle end in the same shape — see
+/// [`key_ends_in_validity`] for the exact check that debug builds assert against.
+pub(crate) fn tail_validity(key: &[u8]) -> Option<Validity> {
+    if key.len() < VLD_ENCODED_LEN {
+        return None;
+    }
+    let tail = &key[key.len() - VLD_ENCODED_LEN..];
+    if tail[0] != VLD_TAG {
+        return None;
+    }
+    let ts_flipped = BigEndian::read_u64(&tail[1..9]);
+    let ts = order_decode_i64(!ts_flipped);
+    Some(Validity {
+        timestamp: ValidityTs(Reverse(ts)),
+        is_assert: Reverse(tail[9] == 0),
+    })
+}
+
+/// Split an encoded key that ends in a validity into its identity — everything but the
+/// validity — and the scan range covering every version of that identity.
+///
+/// A validity is always the last key component of the relation that has one, so the range
+/// `[identity ++ VLD_TAG, identity ++ VLD_TAG+1)` is exactly that key's version chain.
+pub(crate) fn validity_version_range(key: &[u8]) -> (&[u8], Vec<u8>, Vec<u8>) {
+    debug_assert!(key.len() >= VLD_ENCODED_LEN);
+    let identity = &key[..key.len() - VLD_ENCODED_LEN];
+    let mut lower = identity.to_vec();
+    lower.push(VLD_TAG);
+    let mut upper = identity.to_vec();
+    upper.push(VLD_TAG + 1);
+    (identity, lower, upper)
+}
+
+/// The nine bytes an encoded validity with timestamp `ts` begins with: the tag and the
+/// order-encoded timestamp. The tenth byte, the assertion bit, is not part of the marker.
+fn validity_marker(ts: i64) -> [u8; 9] {
+    let mut marker = [0u8; 9];
+    marker[0] = VLD_TAG;
+    BigEndian::write_u64(&mut marker[1..9], !order_encode_i64(ts));
+    marker
+}
+
+/// Whether a buffer contains an encoded validity stamped `ts`, anywhere.
+///
+/// Cozo's derived structures — an HNSW index's neighbour lists, for one — embed the key of the
+/// row they describe, validity included, rather than referring to it. A stamp assigned at
+/// commit therefore has to be rewritten wherever it was copied to, not only where the row's own
+/// key ends (spec §4).
+pub(crate) fn contains_validity_ts(buf: &[u8], ts: i64) -> bool {
+    let marker = validity_marker(ts);
+    buf.windows(marker.len()).any(|w| w == marker)
+}
+
+/// Rewrite every encoded validity stamped `from` to be stamped `to`, in place. Returns how many
+/// were rewritten. Assertion bits are left alone.
+pub(crate) fn restamp_all_validity(buf: &mut [u8], from: i64, to: i64) -> usize {
+    let old = validity_marker(from);
+    let new = validity_marker(to);
+    let mut rewritten = 0;
+    let mut at = 0;
+    while at + old.len() <= buf.len() {
+        if buf[at..at + old.len()] == old {
+            buf[at..at + old.len()].copy_from_slice(&new);
+            at += old.len();
+            rewritten += 1;
+        } else {
+            at += 1;
+        }
+    }
+    rewritten
+}
+
+/// Overwrite the timestamp of the validity that terminates an encoded key.
+///
+/// The caller must have established that the key does end in a validity, normally by way of
+/// [`tail_validity`]. Only the timestamp moves; the assertion bit is left alone.
+pub(crate) fn restamp_tail_validity(key: &mut [u8], ts: i64) {
+    debug_assert!(key.len() >= VLD_ENCODED_LEN);
+    let at = key.len() - VLD_ENCODED_LEN;
+    debug_assert_eq!(key[at], VLD_TAG);
+    let ts_flipped = !order_encode_i64(ts);
+    BigEndian::write_u64(&mut key[at + 1..at + 9], ts_flipped);
+}
+
 const IS_FLOAT: u8 = 0b00010000;
 const IS_APPROX_INT: u8 = 0b00000100;
 const IS_EXACT_INT: u8 = 0b00000000;

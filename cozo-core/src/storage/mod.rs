@@ -25,6 +25,8 @@ pub(crate) mod temp;
 pub(crate) mod tikv;
 #[cfg(feature = "storage-new-rocksdb")]
 pub mod newrocks;
+#[cfg(feature = "storage-layered")]
+pub mod layered;
 // pub(crate) mod re;
 
 /// Swappable storage trait for Cozo's storage engine
@@ -34,6 +36,16 @@ pub trait Storage<'s>: Send + Sync + Clone {
 
     /// Returns a string that identifies the storage kind
     fn storage_kind(&self) -> &'static str;
+
+    /// What `'NOW'` means to this engine when a script is run.
+    ///
+    /// The default is wall-clock time, which is what a single-store engine has to use. An
+    /// engine that assigns validity itself — the layered engine stamps commit order — returns
+    /// its own marker instead, so that scripts run through the ordinary entry points are
+    /// stamped the same way as those run through the engine's own.
+    fn now_validity(&self) -> ValidityTs {
+        crate::data::functions::current_validity()
+    }
 
     /// Create a transaction object. Write ops will only be called when `write == true`.
     fn transact(&'s self, write: bool) -> Result<Self::Tx>;
