@@ -149,10 +149,19 @@ impl<'a> LayerIter<'a> {
 
 /// The k-way merge across a stack (spec §3.3).
 ///
-/// Entries are emitted in key order; where several layers hold the same key, the topmost wins
-/// and the rest are discarded. Layers are compared linearly rather than through a heap: a stack
-/// is a short-lived divergence merged down promptly (spec §6.2), so depth stays in the single
-/// digits and a scan of the array beats maintaining a heap.
+/// Entries are emitted in *full-key* order. For a stackable relation the key embeds the
+/// validity, which sorts descending, so every version of a relation key arrives newest-first
+/// across the whole stack, irrespective of which layer holds it.
+///
+/// Shadowing between layers is therefore not positional. It falls out of the ordinary
+/// single-store validity rule, applied downstream by [`StackSkipIter`] to that newest-first
+/// stream: the winner is the newest version, which is the topmost layer's only when the
+/// topmost layer is also the one that wrote most recently. Stack position decides exactly one
+/// thing — which copy of a byte-identical key is emitted.
+///
+/// Layers are compared linearly rather than through a heap: a stack is a short-lived divergence
+/// merged down promptly (spec §6.2), so depth stays in the single digits and a scan of the array
+/// beats maintaining a heap.
 pub(crate) struct StackMerge<'a> {
     layers: Vec<LayerIter<'a>>,
     upper: Option<Vec<u8>>,
@@ -184,8 +193,10 @@ impl<'a> StackMerge<'a> {
             let Some(key) = layer.key() else { continue };
             match best {
                 None => best = Some(idx),
-                // strictly less: on equal keys the earlier (higher) layer keeps the slot,
-                // which is what shadows the lower layers' versions.
+                // Strictly less, so a tie leaves the slot with the earlier (higher) layer.
+                // A tie is byte-identical keys — same relation key *and* same stamp — so this
+                // chooses which copy of one row to emit. It does not decide which version of a
+                // key wins; the stamp does, in `StackSkipIter`.
                 Some(b) => {
                     if key < self.layers[b].key().unwrap() {
                         best = Some(idx)
@@ -201,6 +212,8 @@ impl<'a> StackMerge<'a> {
         let key = self.layers[front].key().unwrap().to_vec();
         let val = self.layers[front].value().unwrap_or_default().to_vec();
         let upper = self.upper.clone();
+        // Advance every layer sitting on this exact key, not just the front one: that is what
+        // collapses a row present identically in several layers into a single emission.
         for layer in self.layers.iter_mut() {
             if layer.key() == Some(key.as_slice()) {
                 if let Err(err) = layer.advance(upper.as_deref()) {

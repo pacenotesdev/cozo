@@ -31,6 +31,7 @@ mod indexes;
 mod lifecycle;
 mod oracle;
 mod reads;
+mod restack;
 mod retraction;
 mod sequences;
 mod windows;
