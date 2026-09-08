@@ -1,6 +1,6 @@
 /*
- * Flatten (spec §10.8): net effect through a view, then dedupe, collision and tombstone
- * liveness against the destination.
+ * Flatten: net effect through a view, then dedupe, collision and tombstone liveness
+ * against the destination.
  */
 
 use miette::Result;
@@ -17,7 +17,7 @@ fn branch(f: &Fixture, name: &str) -> Result<(Stack, Stack)> {
     Ok((stack, view))
 }
 
-/// F1. A record created and retracted inside the window contributes nothing: its net effect is
+/// A record created and retracted inside the window contributes nothing: its net effect is
 /// a tombstone, and a tombstone for a record the destination never saw is dropped.
 #[test]
 fn a_record_born_and_died_inside_the_view_contributes_nothing() -> Result<()> {
@@ -33,7 +33,7 @@ fn a_record_born_and_died_inside_the_view_contributes_nothing() -> Result<()> {
     Ok(())
 }
 
-/// F2. A retraction stamped above the view's ceiling is not in the view, so the live row is
+/// A retraction stamped above the view's ceiling is not in the view, so the live row is
 /// what gets written: a view cannot see its own future.
 #[test]
 fn a_retraction_above_the_ceiling_is_not_in_the_view() -> Result<()> {
@@ -50,7 +50,7 @@ fn a_retraction_above_the_ceiling_is_not_in_the_view() -> Result<()> {
     Ok(())
 }
 
-/// F3. A record created below the floor and retracted inside the window nets to a tombstone,
+/// A record created below the floor and retracted inside the window nets to a tombstone,
 /// which is copied exactly when the destination holds the record live.
 #[test]
 fn a_net_tombstone_is_copied_only_where_it_bites() -> Result<()> {
@@ -66,7 +66,7 @@ fn a_net_tombstone_is_copied_only_where_it_bites() -> Result<()> {
     Ok(())
 }
 
-/// F5. A record the destination already holds live, cherry-picked again: skipped, counted, and
+/// A record the destination already holds live, cherry-picked again: skipped, counted, and
 /// the destination is unchanged.
 #[test]
 fn an_identical_record_dedupes() -> Result<()> {
@@ -83,7 +83,7 @@ fn an_identical_record_dedupes() -> Result<()> {
     Ok(())
 }
 
-/// F7. The view's net assertion over a key the destination has tombstoned: the record returns.
+/// The view's net assertion over a key the destination has tombstoned: the record returns.
 #[test]
 fn a_re_introduction_revives_a_retracted_record() -> Result<()> {
     let f = Fixture::new()?;
@@ -100,7 +100,7 @@ fn a_re_introduction_revives_a_retracted_record() -> Result<()> {
     Ok(())
 }
 
-/// F8. The liveness check reads the destination *stack*, not its top layer: a tombstone whose
+/// The liveness check reads the destination *stack*, not its top layer: a tombstone whose
 /// key is live further down the destination's lineage is still copied.
 #[test]
 fn liveness_is_checked_through_the_whole_destination_stack() -> Result<()> {
@@ -125,7 +125,7 @@ fn liveness_is_checked_through_the_whole_destination_stack() -> Result<()> {
     Ok(())
 }
 
-/// F9. Both sides deleted the same record: the second tombstone bites nothing and is dropped.
+/// Both sides deleted the same record: the second tombstone bites nothing and is dropped.
 #[test]
 fn a_second_tombstone_is_dropped() -> Result<()> {
     let f = Fixture::new()?;
@@ -141,7 +141,7 @@ fn a_second_tombstone_is_dropped() -> Result<()> {
     Ok(())
 }
 
-/// F10. With restamping, the destination's history stays true: a read at a sequence captured
+/// With restamping, the destination's history stays true: a read at a sequence captured
 /// before the flatten shows nothing the flatten brought in.
 #[test]
 fn restamping_keeps_the_destination_history_true() -> Result<()> {
@@ -164,7 +164,7 @@ fn restamping_keeps_the_destination_history_true() -> Result<()> {
     Ok(())
 }
 
-/// F11. Without restamping, rows keep their authoring stamps and interleave into the
+/// Without restamping, rows keep their authoring stamps and interleave into the
 /// destination's history where they were written.
 #[test]
 fn without_restamping_the_authoring_stamps_survive() -> Result<()> {
@@ -183,7 +183,7 @@ fn without_restamping_the_authoring_stamps_survive() -> Result<()> {
     Ok(())
 }
 
-/// F12. The identical flatten run twice copies nothing the second time. This is also the
+/// The identical flatten run twice copies nothing the second time. This is also the
 /// crash-recovery story: recovery is rerunning it.
 #[test]
 fn flatten_is_idempotent() -> Result<()> {
@@ -205,7 +205,7 @@ fn flatten_is_idempotent() -> Result<()> {
     Ok(())
 }
 
-/// F13. An empty view writes nothing and leaves the destination alone.
+/// An empty view writes nothing and leaves the destination alone.
 #[test]
 fn an_empty_view_is_a_no_op() -> Result<()> {
     let f = Fixture::new()?;
@@ -221,7 +221,7 @@ fn an_empty_view_is_a_no_op() -> Result<()> {
     Ok(())
 }
 
-/// F16. Flattening into a destination whose top layer already holds unmerged work — a
+/// Flattening into a destination whose top layer already holds unmerged work — a
 /// cherry-pick into an active branch — leaves that work alone, and checks against the whole
 /// destination stack.
 #[test]

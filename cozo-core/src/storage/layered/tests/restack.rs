@@ -103,7 +103,7 @@ fn restacking_below_the_fork_keeps_the_layer_intact() -> Result<()> {
         frontier(&[("early", "v0"), ("on-work", "v2")])
     );
 
-    // A query-level `at` is the one ceiling that does apply to every layer at once (§3.1).
+    // A query-level `at` is the one ceiling that does apply to every layer at once.
     assert_eq!(
         f.live(&rebased, Some(earlier))?,
         frontier(&[("early", "v0")])

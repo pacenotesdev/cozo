@@ -1,5 +1,5 @@
 /*
- * Layered storage: the stack-aware transaction (spec §3.2, §3.3, §3.4, §4).
+ * Layered storage: the stack-aware transaction.
  */
 
 use std::cell::OnceCell;
@@ -31,14 +31,14 @@ pub(crate) struct BoundLayer<'a> {
 /// A transaction over a stack of layers.
 ///
 /// Reads compose the stack; writes land in the top layer only, which is what makes concurrent
-/// stacks safe (spec §2.2). Catalog keys are the exception: they are global (spec §7) and are
+/// stacks safe. Catalog keys are the exception: they are global and are
 /// read and written against the default column family whatever stack is in play.
 pub struct LayeredTx<'a> {
     pub(crate) inner: &'a LayeredInner,
     pub(crate) tx: Option<LayeredTxn<'a>>,
     pub(crate) layers: Vec<BoundLayer<'a>>,
     pub(crate) catalog: Arc<BoundColumnFamily<'a>>,
-    /// Keys written with the pending stamp, awaiting a sequence number at commit (spec §4).
+    /// Keys written with the pending stamp, awaiting a sequence number at commit.
     pub(crate) pending: Vec<Vec<u8>>,
     /// The catalog, read lazily: only a multi-layer stack needs it, and then only once.
     pub(crate) relations: OnceCell<BTreeMap<u64, RelInfo>>,
@@ -48,7 +48,7 @@ pub struct LayeredTx<'a> {
 // engine relies on Cozo never sharing one transaction across threads concurrently.
 unsafe impl<'a> Sync for LayeredTx<'a> {}
 
-/// Catalog keys live under the system relation, which is global across layers (spec §7).
+/// Catalog keys live under the system relation, which is global across layers.
 #[inline]
 pub(crate) fn is_catalog_key(key: &[u8]) -> bool {
     key.len() >= 8 && key[..8] == [0u8; 8]
@@ -114,7 +114,7 @@ impl<'a> LayeredTx<'a> {
         Ok(self.relations.get_or_init(|| scanned))
     }
 
-    /// The gate a multi-layer stack puts in front of every key it touches (spec §3.4).
+    /// The gate a multi-layer stack puts in front of every key it touches.
     ///
     /// Stackability is decided at relation creation and read back from the catalog here, so
     /// the answer depends on the relation alone — not on which layer a particular row happens
@@ -127,7 +127,7 @@ impl<'a> LayeredTx<'a> {
         if is_catalog_key(key) {
             if destructive {
                 // Destructive DDL through a multi-layer stack would strike layers the caller is
-                // not writing to: the catalog is global, but the rows are not (spec §7).
+                // not writing to: the catalog is global, but the rows are not.
                 bail!(
                     "destructive schema changes need a single-layer stack; this one is [{}]",
                     self.stack_description()
@@ -146,7 +146,7 @@ impl<'a> LayeredTx<'a> {
         // Index relations are exempt. They hold no user records — nothing anyone retracts —
         // and the engine maintains them inside whichever layer is being written. Reads compose
         // through the stack by exact key, and a stack topology change invalidates them anyway:
-        // the remedy is drop-and-rebuild, not a retraction (spec §5).
+        // the remedy is drop-and-rebuild, not a retraction.
         if !info.stackable && !info.is_index {
             bail!(
                 "relation '{}' has no validity column, so it cannot express a cross-layer \
@@ -185,7 +185,7 @@ impl<'a> LayeredTx<'a> {
 }
 
 /// What a stack currently says about one key's identity — everything a write-path or flatten
-/// decision needs (spec §2.4, §5).
+/// decision needs.
 pub(crate) struct KeyState {
     /// Whether the newest visible version asserts.
     pub(crate) live: bool,
@@ -292,7 +292,7 @@ impl<'s> StoreTx<'s> for LayeredTx<'s> {
         // The sequence is assigned by storage, not by the query. A user-supplied value above
         // the current sequence would shadow future writes and break layer isolation, and one
         // below it would appear to predate a fork it postdates. Failing is better than
-        // accepting it or silently ignoring it (spec §2.3).
+        // accepting it or silently ignoring it.
         if vld.is_some() && !stamped {
             bail!(
                 "explicit validity is not accepted: the sequence is assigned by storage at \
@@ -300,7 +300,7 @@ impl<'s> StoreTx<'s> for LayeredTx<'s> {
             );
         }
 
-        // A key's value is immutable; its visibility is not (spec §2.4). Re-asserting the
+        // A key's value is immutable; its visibility is not. Re-asserting the
         // identical value is how a retracted record is re-introduced; asserting a different
         // one — over a live row or a tombstoned one — is backdoor mutability, and merge
         // soundness rests on it never happening.
@@ -330,7 +330,7 @@ impl<'s> StoreTx<'s> for LayeredTx<'s> {
     fn supports_par_put(&self) -> bool {
         // Deliberately not supported. Parallel puts would have several threads writing to one
         // RocksDB transaction at once, and a transaction's write batch is not thread-safe; the
-        // pending-stamp buffer (spec §4) and the write-path invariant check (spec §2.4) would
+        // pending-stamp buffer and the write-path invariant check would
         // both need locking on top of that. Cozo falls back to sequential puts, which costs
         // bulk-import throughput and nothing else.
         false
@@ -382,7 +382,7 @@ impl<'s> StoreTx<'s> for LayeredTx<'s> {
             .ok_or_else(|| miette!("transaction already committed"))?;
 
         // The stamp is commit order, so it has to be read where commits are serialized, and the
-        // batch has to land before the next commit proceeds (spec §2.3, §4).
+        // batch has to land before the next commit proceeds.
         let _ordered = self
             .inner
             .commit_lock
@@ -483,7 +483,7 @@ impl<'s> StoreTx<'s> for LayeredTx<'s> {
 impl LayeredInner {
     pub(crate) fn next_stamp(&self) -> Seq {
         // `latest_sequence_number` is the last sequence RocksDB assigned, which is exactly the
-        // fork point a consumer would have captured (spec §2.3). Stamping one above it is what
+        // fork point a consumer would have captured. Stamping one above it is what
         // makes a fork point stable: rows committed after a fork are strictly above it.
         self.db.latest_sequence_number() as Seq + 1
     }

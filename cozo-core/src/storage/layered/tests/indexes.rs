@@ -1,5 +1,5 @@
 /*
- * Index relations through a branch cycle (spec §10.8 F14, §10.12 G12).
+ * Index relations through a branch cycle.
  *
  * Reads compose through a stack: an index stores its structure as ordinary rows, so a layer's
  * rewritten neighbour lists shadow the base's and traversal sees a coherent graph. Flatten does
@@ -47,7 +47,7 @@ fn neighbours(f: &Fixture, stack: &Stack) -> Result<BTreeSet<String>> {
     Ok(rows.rows.iter().map(|r| super::as_str(&r[0])).collect())
 }
 
-/// G12. Vectors written in a branch, queried through the stack, then merged down with the
+/// Vectors written in a branch, queried through the stack, then merged down with the
 /// index dropped and rebuilt. Recall after the rebuild matches what the stack query returned.
 #[test]
 fn an_index_survives_a_branch_cycle_by_being_rebuilt() -> Result<()> {
@@ -89,7 +89,7 @@ fn an_index_survives_a_branch_cycle_by_being_rebuilt() -> Result<()> {
     let stats = f.db.flatten(&vec![LayerRef::new("work")], &base(), true)?;
     assert_eq!(stats.rows_copied, 2, "only the records should be copied");
 
-    // Rebuild in the destination, per §5, and recall matches the pre-merge stack query.
+    // Rebuild in the destination, and recall matches the pre-merge stack query.
     f.db.run_script(
         "::hnsw drop vrec:idx",
         Default::default(),

@@ -1,15 +1,14 @@
 /*
- * The differential oracle (spec §10.1) and the algebraic properties it makes testable
- * (spec §10.11).
+ * A differential oracle, and the algebraic properties it makes testable.
  *
- * The model below is a deliberately naive transliteration of §3.1 and §5 over ordered maps: no
- * iterators, no encoding, no seeks, no windows expressed as byte ranges. That is the point.
- * It shares the *rules* with the engine but none of the machinery, so what it catches is
- * machinery: a seek that lands one row early, a window applied to the wrong layer, a merge that
- * drops the last key of a range.
+ * The model below is a deliberately naive restatement of the stack-resolution and flatten rules
+ * over ordered maps: no iterators, no encoding, no seeks, no windows expressed as byte ranges.
+ * That is the point. It shares the *rules* with the engine but none of the machinery, so what
+ * it catches is machinery: a seek that lands one row early, a window applied to the wrong
+ * layer, a merge that drops the last key of a range.
  *
- * It cannot catch a misreading of the specification that both implementations share. The
- * enumerated suites are what stand behind that.
+ * It cannot catch a misreading of the rules that both implementations share. The explicit
+ * cases in the sibling modules are what stand behind that.
  */
 
 use std::collections::BTreeMap;
@@ -319,9 +318,9 @@ impl Pair {
     }
 }
 
-/// A7. The randomized driver: arbitrary legal operation sequences against the store and the
-/// model at once, with every read compared. The enumerated catalog catches what we thought of;
-/// this is for what we did not.
+/// The randomized driver: arbitrary legal operation sequences against the store and the
+/// model at once, with every read compared. The explicit cases cover the situations worth
+/// naming; this covers the ones nobody thought to name.
 #[test]
 fn randomized_operations_match_the_model() -> Result<()> {
     for seed in 0..24u64 {
@@ -360,7 +359,7 @@ fn randomized_operations_match_the_model() -> Result<()> {
     Ok(())
 }
 
-/// A1. Merging the same layer twice is merging it once.
+/// Merging the same layer twice is merging it once.
 #[test]
 fn merging_is_idempotent() -> Result<()> {
     for seed in 0..8u64 {
@@ -385,7 +384,7 @@ fn merging_is_idempotent() -> Result<()> {
     Ok(())
 }
 
-/// A2. Merging two branches commutes whenever no key is retracted in one and asserted in the
+/// Merging two branches commutes whenever no key is retracted in one and asserted in the
 /// other — which, with keys that are collision-free by construction, is the ordinary case.
 #[test]
 fn disjoint_merges_commute() -> Result<()> {
@@ -412,7 +411,7 @@ fn disjoint_merges_commute() -> Result<()> {
     Ok(())
 }
 
-/// A3. The documented non-property.
+/// The documented non-property.
 ///
 /// One branch retracts a key the base holds; the other re-asserts it. Merging A then B leaves
 /// the key live; B then A leaves it dead, because B's assertion dedupes against a row that is
@@ -446,7 +445,7 @@ fn delete_and_reintroduce_merges_do_not_commute() -> Result<()> {
     Ok(())
 }
 
-/// A5. Fork, work, merge down, drop is the same as doing the work directly on a quiescent base.
+/// Fork, work, merge down, drop is the same as doing the work directly on a quiescent base.
 #[test]
 fn a_fork_merge_round_trip_matches_direct_work() -> Result<()> {
     let direct = {
@@ -474,7 +473,7 @@ fn a_fork_merge_round_trip_matches_direct_work() -> Result<()> {
     Ok(())
 }
 
-/// A6. Picking a window and then reverting it leaves the frontier where it started. Tombstone
+/// Picking a window and then reverting it leaves the frontier where it started. Tombstone
 /// counts differ — the history remembers both moves — but the frontier must not.
 #[test]
 fn a_pick_and_its_revert_cancel() -> Result<()> {

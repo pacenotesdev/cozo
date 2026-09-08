@@ -1,5 +1,5 @@
 /*
- * Layered storage: windowed iterators and the k-way stack merge (spec §3.1, §3.3).
+ * Layered storage: windowed iterators and the k-way stack merge.
  */
 
 use miette::{miette, Result};
@@ -15,7 +15,7 @@ pub(crate) type LayeredDb = OptimisticTransactionDB<MultiThreaded>;
 pub(crate) type LayeredTxn<'a> = Transaction<'a, LayeredDb>;
 type RawIter<'a> = DBRawIteratorWithThreadMode<'a, LayeredTxn<'a>>;
 
-/// The visibility window of one layer within one stack (spec §3.1).
+/// The visibility window of one layer within one stack.
 ///
 /// `since` is an exclusive floor and `bound` an inclusive ceiling, so the window `(fork, head]`
 /// is exactly "everything since the fork" with the fork-point row belonging to the parent.
@@ -38,7 +38,7 @@ impl Window {
     /// A row with no validity carries no sequence, so no window excludes it: a window selects
     /// by *when*, and such a row has no when. The relations this applies to are index
     /// relations — everything else without a validity is refused by a multi-layer stack
-    /// altogether (spec §3.4) — and it is what makes an index compose through a stack at all:
+    /// altogether — and it is what makes an index compose through a stack at all:
     /// a bounded base layer must keep contributing its edges, or traversal from a branch sees
     /// only the branch's own nodes and silently loses the rest.
     pub(crate) fn admits(&self, key: &[u8]) -> bool {
@@ -147,7 +147,7 @@ impl<'a> LayerIter<'a> {
     }
 }
 
-/// The k-way merge across a stack (spec §3.3).
+/// The k-way merge across a stack.
 ///
 /// Entries are emitted in *full-key* order. For a stackable relation the key embeds the
 /// validity, which sorts descending, so every version of a relation key arrives newest-first
@@ -160,7 +160,7 @@ impl<'a> LayerIter<'a> {
 /// thing — which copy of a byte-identical key is emitted.
 ///
 /// Layers are compared linearly rather than through a heap: a stack is a short-lived divergence
-/// merged down promptly (spec §6.2), so depth stays in the single digits and a scan of the array
+/// merged down promptly, so depth stays in the single digits and a scan of the array
 /// beats maintaining a heap.
 pub(crate) struct StackMerge<'a> {
     layers: Vec<LayerIter<'a>>,
@@ -267,7 +267,7 @@ impl<'a> Iterator for StackTupleIter<'a> {
 /// skipped entirely when that version is a retraction.
 ///
 /// The merge below it already presents each key's versions newest-first across all layers, so
-/// cross-layer shadowing and cross-layer retraction (spec §3.4) both fall out of running the
+/// cross-layer shadowing and cross-layer retraction both fall out of running the
 /// single-store validity rule over the merged stream.
 pub(crate) struct StackSkipIter<'a> {
     pub(crate) merge: StackMerge<'a>,

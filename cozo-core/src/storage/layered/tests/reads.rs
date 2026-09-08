@@ -1,5 +1,5 @@
 /*
- * Point reads, shadowing, and the merge iterator (spec §10.4, §10.5).
+ * Point reads, shadowing, and the merge iterator.
  */
 
 use miette::Result;
@@ -25,7 +25,7 @@ fn three_layers(f: &Fixture) -> Result<(Stack, Stack, Stack)> {
     Ok((base_stack, mid, top))
 }
 
-/// P1. A key held in any single position of the stack resolves, with the right value.
+/// A key held in any single position of the stack resolves, with the right value.
 #[test]
 fn a_key_resolves_from_any_position() -> Result<()> {
     let f = Fixture::new()?;
@@ -41,7 +41,7 @@ fn a_key_resolves_from_any_position() -> Result<()> {
     Ok(())
 }
 
-/// P2. A key absent from every layer is absent, and no neighbouring key leaks in.
+/// A key absent from every layer is absent, and no neighbouring key leaks in.
 #[test]
 fn an_absent_key_stays_absent() -> Result<()> {
     let f = Fixture::new()?;
@@ -60,10 +60,10 @@ fn an_absent_key_stays_absent() -> Result<()> {
     Ok(())
 }
 
-/// R1, R2. Keys interleaved across three layers emit in key order, and a key several layers
+/// Keys interleaved across three layers emit in key order, and a key several layers
 /// hold emits exactly once.
 ///
-/// Value immutability (spec §2.4) means two layers can never legitimately disagree about a
+/// Value immutability means two layers can never legitimately disagree about a
 /// key's *value*, so "the topmost layer wins" is observable as deduplication here and as
 /// precedence in the retraction case below — never as one value beating another.
 #[test]
@@ -121,7 +121,7 @@ fn a_higher_layer_takes_precedence() -> Result<()> {
     Ok(())
 }
 
-/// R4. Empty layers mid-stack, and a stack that is empty throughout, scan cleanly.
+/// Empty layers mid-stack, and a stack that is empty throughout, scan cleanly.
 #[test]
 fn empty_layers_scan_cleanly() -> Result<()> {
     let f = Fixture::new()?;
@@ -133,7 +133,7 @@ fn empty_layers_scan_cleanly() -> Result<()> {
     Ok(())
 }
 
-/// R5. A scan of one relation emits no rows of another, from any layer.
+/// A scan of one relation emits no rows of another, from any layer.
 #[test]
 fn relations_do_not_leak_across_layers() -> Result<()> {
     let f = Fixture::new()?;
@@ -164,7 +164,7 @@ fn relations_do_not_leak_across_layers() -> Result<()> {
     Ok(())
 }
 
-/// R9. Bounded scans — the shape of upstream's stored-relation `prefix_join` regression
+/// Bounded scans — the shape of upstream's stored-relation `prefix_join` regression
 /// (commit `ff9a4fce`) — behave across layers as they do on one.
 #[test]
 fn bounded_scans_compose_across_layers() -> Result<()> {
@@ -200,7 +200,7 @@ fn bounded_scans_compose_across_layers() -> Result<()> {
     Ok(())
 }
 
-/// R10. Read results do not depend on the order in which layers were created.
+/// Read results do not depend on the order in which layers were created.
 #[test]
 fn results_are_independent_of_layer_creation_order() -> Result<()> {
     let f = Fixture::new()?;

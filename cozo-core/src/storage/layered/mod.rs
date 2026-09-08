@@ -2,7 +2,7 @@
  * Layered storage for the RocksDB backend.
  *
  * A layer is one column family; a stack is an ordered list of layers with visibility windows.
- * Reads compose the stack, writes land in its top layer. See `plans/cozo-layered-storage-spec.md`.
+ * Reads compose the stack, writes land in its top layer.
  */
 
 use std::cmp::Reverse;
@@ -33,16 +33,16 @@ pub(crate) mod tx;
 mod tests;
 
 /// A storage sequence number. This is RocksDB's own commit-order counter, reinterpreted as
-/// Cozo's validity timestamp (spec §2.3) — it is not a wall clock, and it is sparse.
+/// Cozo's validity timestamp — it is not a wall clock, and it is sparse.
 pub type Seq = i64;
 
-/// The stamp a row carries between `put` and `commit`, before commit order is known (spec §4).
+/// The stamp a row carries between `put` and `commit`, before commit order is known.
 ///
 /// It sorts newer than any real sequence, so a transaction reads its own buffered writes.
 pub const PENDING_SEQ: Seq = i64::MAX - 1;
 
 /// The layer every store starts with. It is a normal layer in every respect except that it
-/// cannot be dropped: the catalog and the existing entry points live on it (spec §6, §7).
+/// cannot be dropped: the catalog and the existing entry points live on it.
 pub const DEFAULT_LAYER: &str = "default";
 
 /// The name of a layer. Opaque to Cozo: whether it is a branch, a tenant, a draft or a sandbox
@@ -68,7 +68,7 @@ impl Display for LayerId {
     }
 }
 
-/// A layer as it appears in one stack: which layer, and through what window (spec §3.1).
+/// A layer as it appears in one stack: which layer, and through what window.
 ///
 /// Windows are per-stack, not per-layer: the same layer may appear in two stacks at different
 /// windows simultaneously.
@@ -143,7 +143,7 @@ const CURRENT_STORAGE_VERSION: u64 = 3;
 /// State shared by every handle onto one layered store.
 pub struct LayeredInner {
     pub(crate) db: LayeredDb,
-    /// Serializes commits so that the sequence read at commit really is commit order (spec §4).
+    /// Serializes commits so that the sequence read at commit really is commit order.
     pub(crate) commit_lock: Mutex<()>,
     pub(crate) layers: RwLock<BTreeSet<String>>,
 }
@@ -152,7 +152,7 @@ pub struct LayeredInner {
 ///
 /// A handle carries the stack it reads and writes through. Handles are cheap and independent:
 /// [`Db::run_on_stack`] makes one per call rather than keeping an ambient "current layer",
-/// because ambient state plus concurrent writers is a race (spec §6).
+/// because ambient state plus concurrent writers is a race.
 #[derive(Clone)]
 pub struct LayeredStorage {
     inner: std::sync::Arc<LayeredInner>,
@@ -239,7 +239,7 @@ impl LayeredStorage {
     }
 
     /// Check a stack against the open store. Errors here are cheap and deterministic, which is
-    /// why the checks live at stack construction rather than mid-query (spec §3.4).
+    /// why the checks live at stack construction rather than mid-query.
     pub(crate) fn resolve(&self, stack: &Stack) -> Result<StackSpec> {
         if stack.is_empty() {
             bail!("a stack must name at least one layer");
@@ -287,7 +287,7 @@ impl<'s> Storage<'s> for LayeredStorage {
     fn now_validity(&self) -> ValidityTs {
         // The sequence is assigned by storage at commit, so `'NOW'` is the pending stamp
         // rather than a clock reading — including for the ordinary entry points, which run
-        // against a single-layer stack on the default layer (spec §2.3, §6).
+        // against a single-layer stack on the default layer.
         vld_at(PENDING_SEQ)
     }
 
@@ -433,14 +433,14 @@ impl Db<LayeredStorage> {
     }
 
     /// The last committed sequence. A fork point taken from here is stable: everything
-    /// committed afterwards is stamped strictly above it (spec §2.3).
+    /// committed afterwards is stamped strictly above it.
     pub fn current_seq(&self) -> Result<Seq> {
         Ok(self.db.inner.db.latest_sequence_number() as Seq)
     }
 
     /// Run a script against a stack.
     ///
-    /// `at` is a historical read bound composed with each layer's own bound (spec §3.1); it is
+    /// `at` is a historical read bound composed with each layer's own bound; it is
     /// meaningless for a write, since a write's sequence is assigned at commit.
     pub fn run_on_stack(
         &self,

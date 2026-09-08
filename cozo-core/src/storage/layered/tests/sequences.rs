@@ -1,5 +1,5 @@
 /*
- * Sequence and commit stamping (spec §10.2).
+ * Sequence and commit stamping.
  */
 
 use std::collections::BTreeMap;
@@ -12,7 +12,7 @@ use crate::data::value::DataValue;
 use crate::runtime::db::ScriptMutability;
 use crate::storage::layered::new_cozo_layered;
 
-/// S1. Sequential commits carry strictly increasing stamps.
+/// Sequential commits carry strictly increasing stamps.
 #[test]
 fn stamps_increase_with_commit_order() -> Result<()> {
     let f = Fixture::new()?;
@@ -30,7 +30,7 @@ fn stamps_increase_with_commit_order() -> Result<()> {
     Ok(())
 }
 
-/// S2. Every row of one transaction carries the identical stamp: a transaction is a single
+/// Every row of one transaction carries the identical stamp: a transaction is a single
 /// point in commit order.
 #[test]
 fn one_transaction_is_one_stamp() -> Result<()> {
@@ -53,7 +53,7 @@ fn one_transaction_is_one_stamp() -> Result<()> {
     Ok(())
 }
 
-/// S3. A transaction is indivisible under time travel: a read at its stamp sees all of its
+/// A transaction is indivisible under time travel: a read at its stamp sees all of its
 /// rows, and a read at any earlier captured sequence sees none of them.
 #[test]
 fn a_transaction_is_atomic_under_time_travel() -> Result<()> {
@@ -76,11 +76,11 @@ fn a_transaction_is_atomic_under_time_travel() -> Result<()> {
     Ok(())
 }
 
-/// S5. A fork point never subsequently acquires rows.
+/// A fork point never subsequently acquires rows.
 ///
-/// This is the stamp-at-put bug of spec §2.3, pinned so it cannot return: were the sequence
-/// read when the row was buffered rather than when it was committed, a fork captured in
-/// between would grow a row underneath it.
+/// Pinned so that stamping cannot drift back to write time: were the sequence read when the
+/// row was buffered rather than when it was committed, a fork captured in between would grow a
+/// row underneath it.
 #[test]
 fn a_fork_point_is_stable() -> Result<()> {
     let f = Fixture::new()?;
@@ -105,7 +105,7 @@ fn a_fork_point_is_stable() -> Result<()> {
     Ok(())
 }
 
-/// S6. Sparseness tolerance: unrelated writes move the counter, and nothing may depend on
+/// Sparseness tolerance: unrelated writes move the counter, and nothing may depend on
 /// consecutiveness. This is the meta-test for the no-hardcoded-sequences convention.
 #[test]
 fn expectations_survive_unrelated_writes() -> Result<()> {
@@ -135,7 +135,7 @@ fn expectations_survive_unrelated_writes() -> Result<()> {
     Ok(())
 }
 
-/// S7. Restart continuity: persisted stamps are unchanged by a reopen, and new stamps land
+/// Restart continuity: persisted stamps are unchanged by a reopen, and new stamps land
 /// strictly above every persisted one.
 #[test]
 fn stamps_survive_a_restart() -> Result<()> {
@@ -178,7 +178,7 @@ fn stamps_survive_a_restart() -> Result<()> {
     Ok(())
 }
 
-/// S8. Explicit validity is rejected. A user-supplied sequence above the current one would
+/// Explicit validity is rejected. A user-supplied sequence above the current one would
 /// shadow future writes and break layer isolation; one below it would appear to predate a fork
 /// it postdates. Failing beats accepting it, and beats silently ignoring it.
 #[test]

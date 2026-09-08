@@ -1,7 +1,7 @@
 /*
- * Layered storage test harness (spec §10.1).
+ * Layered storage test harness.
  *
- * Two conventions matter throughout, and both come straight from the specification:
+ * Two conventions matter throughout:
  *
  * *Never hardcode sequence numbers.* They are sparse — the counter advances on every write to
  * the instance, not only ours — so every expectation is derived from a stamp the test read back

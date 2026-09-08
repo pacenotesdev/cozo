@@ -1,5 +1,5 @@
 /*
- * Layered storage: what the global catalog says about a relation (spec §3.4, §7).
+ * Layered storage: what the global catalog says about a relation.
  *
  * Stackability is a property of a relation's schema, fixed when it is created: a relation whose
  * last key column is a validity can express a cross-layer retraction, and one without cannot.
@@ -28,7 +28,7 @@ pub(crate) struct RelInfo {
     /// Whether the relation carries a validity, and so can express a cross-layer retraction.
     pub(crate) stackable: bool,
     /// Index relations store their structure as ordinary rows. They compose through a stack but
-    /// are never flattened; the destination's are dropped and rebuilt (spec §5).
+    /// are never flattened; the destination's are dropped and rebuilt.
     pub(crate) is_index: bool,
 }
 

@@ -1,5 +1,5 @@
 /*
- * Value immutability (spec §10.7).
+ * Value immutability.
  *
  * A key's value is immutable; its visibility is not. Everything merge soundness rests on is in
  * this suite: with values that never change, merging two layers is a set union.
@@ -16,7 +16,7 @@ fn branch(f: &Fixture, name: &str) -> Result<Stack> {
     Ok(vec![LayerRef::new(name), LayerRef::bounded("default", fork)])
 }
 
-/// V1. Re-asserting the identical value is accepted and changes nothing.
+/// Re-asserting the identical value is accepted and changes nothing.
 #[test]
 fn an_identical_re_assert_is_accepted() -> Result<()> {
     let f = Fixture::new()?;
@@ -26,7 +26,7 @@ fn an_identical_re_assert_is_accepted() -> Result<()> {
     Ok(())
 }
 
-/// V2. A different value under a live key in the same layer is rejected.
+/// A different value under a live key in the same layer is rejected.
 #[test]
 fn a_differing_re_assert_is_rejected() -> Result<()> {
     let f = Fixture::new()?;
@@ -40,7 +40,7 @@ fn a_differing_re_assert_is_rejected() -> Result<()> {
     Ok(())
 }
 
-/// V3. The check traverses the whole stack, not just the top layer: a value held only in a
+/// The check traverses the whole stack, not just the top layer: a value held only in a
 /// lower layer still forbids a differing assert above it.
 #[test]
 fn a_differing_re_assert_is_rejected_across_layers() -> Result<()> {
@@ -52,7 +52,7 @@ fn a_differing_re_assert_is_rejected_across_layers() -> Result<()> {
     Ok(())
 }
 
-/// V4. Delete-then-recreate is backdoor mutability wherever the tombstone lives, and is
+/// Delete-then-recreate is backdoor mutability wherever the tombstone lives, and is
 /// rejected just as an in-place update would be.
 #[test]
 fn recreating_a_retracted_key_with_a_new_value_is_rejected() -> Result<()> {
@@ -65,7 +65,7 @@ fn recreating_a_retracted_key_with_a_new_value_is_rejected() -> Result<()> {
     Ok(())
 }
 
-/// V5. Undelete: the identical value over a tombstoned key is how a retracted record comes
+/// Undelete: the identical value over a tombstoned key is how a retracted record comes
 /// back, whether by hand or by cherry-pick.
 #[test]
 fn an_identical_value_undeletes() -> Result<()> {
@@ -77,7 +77,7 @@ fn an_identical_value_undeletes() -> Result<()> {
     Ok(())
 }
 
-/// V7. The invisible collision. A parent acquires a key above the branch's bound, with a
+/// The invisible collision. A parent acquires a key above the branch's bound, with a
 /// different value; the branch asserts it too. The write *must* succeed — the conflicting row
 /// is unknowable through this stack — and the merge must be what fails.
 #[test]
@@ -105,7 +105,7 @@ fn a_collision_invisible_to_the_branch_is_caught_at_the_merge() -> Result<()> {
     Ok(())
 }
 
-/// V9. A rejected assert writes nothing and poisons nothing.
+/// A rejected assert writes nothing and poisons nothing.
 #[test]
 fn a_rejected_assert_leaves_the_session_usable() -> Result<()> {
     let f = Fixture::new()?;
@@ -120,7 +120,7 @@ fn a_rejected_assert_leaves_the_session_usable() -> Result<()> {
     Ok(())
 }
 
-/// V8. Relations with no validity keep stock semantics: they never participate in a merge, so
+/// Relations with no validity keep stock semantics: they never participate in a merge, so
 /// nothing rests on their immutability.
 #[test]
 fn relations_without_validity_are_unaffected() -> Result<()> {

@@ -35,7 +35,7 @@ storage-sqlite-src = ["dep:sqlite3-src", "sqlite3-src/bundled"]
 storage-rocksdb = ["dep:cozorocks"]
 storage-new-rocksdb = ["dep:rocksdb"]
 ## Enables the layered RocksDB backend: named storage layers composed into a stack per query,
-## for copy-on-write forks of a database. See `plans/cozo-layered-storage-spec.md`.
+## for copy-on-write forks of a database.
 storage-layered = ["dep:rocksdb"]
 ## Enables the graph algorithms.
 graph-algo = ["graph", "rayon"]

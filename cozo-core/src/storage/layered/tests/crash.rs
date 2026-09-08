@@ -1,5 +1,5 @@
 /*
- * Crash recovery (spec §10.10 C4, C5).
+ * Crash recovery.
  *
  * A crash test needs a real crash, so these re-invoke the test binary as a child process, let
  * it do its work, and abort it. The child bodies are `#[ignore]`d so a normal run skips them;
@@ -34,7 +34,7 @@ fn run_child(test: &str, dir: &PathBuf) -> bool {
         .success()
 }
 
-/// C4. Killed after a commit, the rows and their stamps survive recovery intact.
+/// Killed after a commit, the rows and their stamps survive recovery intact.
 #[test]
 fn a_commit_survives_a_kill() -> Result<()> {
     let dir = tempfile::TempDir::new().unwrap();
@@ -102,7 +102,7 @@ fn child_commits_then_aborts() {
     std::process::abort();
 }
 
-/// C5. Killed during a flatten, rerunning the identical flatten converges on the same
+/// Killed during a flatten, rerunning the identical flatten converges on the same
 /// destination a clean single run produces. Idempotence is the recovery mechanism, and this is
 /// it under an actual kill.
 ///

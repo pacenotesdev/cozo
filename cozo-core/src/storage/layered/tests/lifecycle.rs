@@ -1,5 +1,5 @@
 /*
- * Layer lifecycle and catalog (spec §10.9).
+ * Layer lifecycle and catalog.
  */
 
 use miette::Result;
@@ -9,7 +9,7 @@ use super::{base, frontier, Fixture};
 use crate::runtime::db::ScriptMutability;
 use crate::storage::layered::{new_cozo_layered, LayerId, LayerRef, Stack};
 
-/// L1. Create, list, write, drop.
+/// Create, list, write, drop.
 #[test]
 fn a_layer_round_trips() -> Result<()> {
     let f = Fixture::new()?;
@@ -30,7 +30,7 @@ fn a_layer_round_trips() -> Result<()> {
     Ok(())
 }
 
-/// L2. A recreated layer is empty. Nothing the dropped one held comes back.
+/// A recreated layer is empty. Nothing the dropped one held comes back.
 #[test]
 fn a_dropped_layer_does_not_resurrect() -> Result<()> {
     let f = Fixture::new()?;
@@ -46,7 +46,7 @@ fn a_dropped_layer_does_not_resurrect() -> Result<()> {
     Ok(())
 }
 
-/// L3. Layers and their contents survive a reopen, and stacks rebuild from consumer-held
+/// Layers and their contents survive a reopen, and stacks rebuild from consumer-held
 /// metadata — the fork point is just a number the consumer wrote down.
 #[test]
 fn layers_persist_across_a_reopen() -> Result<()> {
@@ -93,7 +93,7 @@ fn layers_persist_across_a_reopen() -> Result<()> {
     Ok(())
 }
 
-/// L4. A stack naming a layer that is gone fails at construction, not mid-query.
+/// A stack naming a layer that is gone fails at construction, not mid-query.
 #[test]
 fn a_missing_layer_fails_at_stack_construction() -> Result<()> {
     let f = Fixture::new()?;
@@ -109,7 +109,7 @@ fn a_missing_layer_fails_at_stack_construction() -> Result<()> {
     Ok(())
 }
 
-/// L5. The default layer carries the catalog and the existing entry points, so it cannot be
+/// The default layer carries the catalog and the existing entry points, so it cannot be
 /// dropped.
 #[test]
 fn the_default_layer_is_protected() -> Result<()> {
@@ -131,7 +131,7 @@ fn a_layer_cannot_appear_twice_in_one_stack() -> Result<()> {
     Ok(())
 }
 
-/// L7. The catalog is global: a relation created through one stack is visible through every
+/// The catalog is global: a relation created through one stack is visible through every
 /// other, while its *contents* stay in the layer that wrote them.
 #[test]
 fn the_catalog_is_global_and_contents_are_local() -> Result<()> {
@@ -177,7 +177,7 @@ fn the_catalog_is_global_and_contents_are_local() -> Result<()> {
     Ok(())
 }
 
-/// L6. Stackability is settled when the relation is created — a validity column or not — and
+/// Stackability is settled when the relation is created — a validity column or not — and
 /// enforced whenever the relation is reached through a multi-layer stack, before any row is
 /// read. The same relation through a single-layer stack works normally.
 #[test]
@@ -239,7 +239,7 @@ fn a_non_stackable_relation_is_refused_by_a_multi_layer_stack() -> Result<()> {
     Ok(())
 }
 
-/// L8. Destructive schema changes need a single-layer stack: through a multi-layer one they
+/// Destructive schema changes need a single-layer stack: through a multi-layer one they
 /// would strike layers the caller is not writing to, since the catalog is global but the rows
 /// are not.
 #[test]
@@ -328,8 +328,8 @@ fn restoring_a_backup_with_higher_sequences_is_refused() -> Result<()> {
     Ok(())
 }
 
-/// L9, in miniature: the existing entry points run against a single-layer stack on the default
-/// column family and behave as they always did.
+/// The existing entry points run against a single-layer stack on the default column family
+/// and behave as they always did.
 #[test]
 fn the_existing_entry_points_still_work() -> Result<()> {
     let f = Fixture::new()?;

@@ -1,5 +1,5 @@
 /*
- * Window semantics (spec §10.3).
+ * Window semantics.
  */
 
 use miette::Result;
@@ -7,7 +7,7 @@ use miette::Result;
 use super::{base, frontier, Fixture};
 use crate::storage::layered::{LayerRef, Stack};
 
-/// W1. The window is `(since, bound]`: a row stamped exactly at the ceiling is visible, one
+/// The window is `(since, bound]`: a row stamped exactly at the ceiling is visible, one
 /// stamped exactly at the floor is not. The fork-point row belongs to the parent.
 #[test]
 fn the_window_is_half_open() -> Result<()> {
@@ -31,7 +31,7 @@ fn the_window_is_half_open() -> Result<()> {
     Ok(())
 }
 
-/// W2. `since == bound` is a legal, empty window — the natural changeset of a fork with no work.
+/// `since == bound` is a legal, empty window — the natural changeset of a fork with no work.
 #[test]
 fn an_empty_window_is_legal() -> Result<()> {
     let f = Fixture::new()?;
@@ -41,7 +41,7 @@ fn an_empty_window_is_legal() -> Result<()> {
     Ok(())
 }
 
-/// W3. An inverted window is always a consumer bug, and stack construction is where errors are
+/// An inverted window is always a consumer bug, and stack construction is where errors are
 /// cheap and deterministic.
 #[test]
 fn an_inverted_window_is_rejected_at_stack_construction() -> Result<()> {
@@ -56,7 +56,7 @@ fn an_inverted_window_is_rejected_at_stack_construction() -> Result<()> {
     Ok(())
 }
 
-/// W5. A query's `at` is a ceiling only. It never lowers a floor, so a historical read of a
+/// A query's `at` is a ceiling only. It never lowers a floor, so a historical read of a
 /// changeset view yields nothing rather than the pre-window state.
 #[test]
 fn a_query_bound_never_lowers_a_floor() -> Result<()> {
@@ -69,7 +69,7 @@ fn a_query_bound_never_lowers_a_floor() -> Result<()> {
     Ok(())
 }
 
-/// W6. A floor hides the frontier: a floored layer contributes what changed inside the window,
+/// A floor hides the frontier: a floored layer contributes what changed inside the window,
 /// not the state the window inherited.
 #[test]
 fn a_floor_hides_the_frontier() -> Result<()> {
@@ -83,7 +83,7 @@ fn a_floor_hides_the_frontier() -> Result<()> {
     Ok(())
 }
 
-/// W7. A query bound preceding the top layer's first row degenerates to a historical read of
+/// A query bound preceding the top layer's first row degenerates to a historical read of
 /// the layers below it. This falls out of `min` rather than needing a branch in the code, but
 /// it is the case a consumer will hit first, so it is pinned.
 #[test]
@@ -100,7 +100,7 @@ fn a_query_below_the_top_layer_reads_through_it() -> Result<()> {
     Ok(())
 }
 
-/// W8. Flooring one layer of a three-layer stack affects that layer's contribution and nothing
+/// Flooring one layer of a three-layer stack affects that layer's contribution and nothing
 /// else.
 #[test]
 fn a_mid_stack_window_is_local_to_its_layer() -> Result<()> {

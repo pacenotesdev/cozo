@@ -1,5 +1,5 @@
 /*
- * Concurrency (spec §10.10 C1–C3).
+ * Concurrency.
  *
  * Concurrent access to different stacks is the normal case for any consumer that needs layers
  * at all, so these run real threads rather than interleaving by hand.
@@ -13,7 +13,7 @@ use miette::Result;
 use super::{base, frontier, Fixture};
 use crate::storage::layered::{LayerRef, Stack};
 
-/// C1. Writes hammered through one stack never change what another stack reads, as long as
+/// Writes hammered through one stack never change what another stack reads, as long as
 /// they do not share a top layer. This is what "writes go to the top layer only" buys.
 #[test]
 fn writes_through_one_stack_do_not_disturb_another() -> Result<()> {
@@ -52,7 +52,7 @@ fn writes_through_one_stack_do_not_disturb_another() -> Result<()> {
     Ok(())
 }
 
-/// C2. A branch bounded at a fork point reads the same thing for its whole life, however busy
+/// A branch bounded at a fork point reads the same thing for its whole life, however busy
 /// its parent is. The fork point is the entire mechanism: no snapshot, no copy.
 #[test]
 fn a_bounded_branch_is_repeatable_under_a_busy_parent() -> Result<()> {
@@ -85,7 +85,7 @@ fn a_bounded_branch_is_repeatable_under_a_busy_parent() -> Result<()> {
     Ok(())
 }
 
-/// C3. Two heads committing concurrently over one base: each head's changeset holds exactly
+/// Two heads committing concurrently over one base: each head's changeset holds exactly
 /// its own rows and never its sibling's.
 #[test]
 fn concurrent_heads_have_pure_changesets() -> Result<()> {
@@ -125,7 +125,7 @@ fn concurrent_heads_have_pure_changesets() -> Result<()> {
 }
 
 /// Two transactions committing concurrently never share a stamp, and stamp order is commit
-/// order (spec §10.2 S4, §10.13).
+/// order.
 #[test]
 fn concurrent_commits_never_share_a_stamp() -> Result<()> {
     let f = Fixture::new()?;

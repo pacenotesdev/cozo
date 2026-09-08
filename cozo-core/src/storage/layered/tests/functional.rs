@@ -1,6 +1,6 @@
 /*
- * Composite scenarios (spec §10.12): branch-shaped work built only from the public API, so
- * these double as documentation of what a consumer is expected to do.
+ * Composite scenarios: branch-shaped work built only from the public API, so these double
+ * as documentation of what a consumer is expected to do.
  */
 
 use miette::Result;
@@ -8,7 +8,7 @@ use miette::Result;
 use super::{base, frontier, Fixture};
 use crate::storage::layered::{LayerRef, Stack};
 
-/// The worked example of spec §6.1, end to end: a scratch layer over a bounded base.
+/// The basic branch shape, end to end: a scratch layer over a bounded base.
 ///
 /// The isolation is asymmetric on purpose. `work` is blind to `base` by *bound*; `base` is
 /// blind to `work` by *stack membership*, and needs no bound of its own.
@@ -33,7 +33,7 @@ fn forked_reads_are_isolated_in_both_directions() -> Result<()> {
     Ok(())
 }
 
-/// The parent keeps moving after the fork, and none of it reaches the branch (spec §10.4 P6).
+/// The parent keeps moving after the fork, and none of it reaches the branch.
 #[test]
 fn the_bound_seals_the_parent() -> Result<()> {
     let f = Fixture::new()?;
@@ -72,7 +72,7 @@ fn a_post_fork_parent_delete_does_not_reach_the_branch() -> Result<()> {
 }
 
 /// A branch deletes a record it does not own. The retraction shadows the base's row through
-/// this stack and only through this stack (spec §10.6 D1).
+/// this stack and only through this stack.
 #[test]
 fn a_branch_deletes_a_record_it_does_not_own() -> Result<()> {
     let f = Fixture::new()?;
@@ -94,7 +94,7 @@ fn a_branch_deletes_a_record_it_does_not_own() -> Result<()> {
 }
 
 /// A branch of a branch. Each layer answers only to its own window: a base row written after
-/// the *first* fork stays invisible even though it precedes the second (spec §10.3 W9).
+/// the *first* fork stays invisible even though it precedes the second.
 #[test]
 fn a_lineage_bounds_each_ancestor_at_its_own_fork() -> Result<()> {
     let f = Fixture::new()?;
@@ -128,8 +128,7 @@ fn a_lineage_bounds_each_ancestor_at_its_own_fork() -> Result<()> {
     Ok(())
 }
 
-/// A record retracted on a branch and re-introduced above it, identically, is live again
-/// (spec §10.4 P5, §10.6 D4).
+/// A record retracted on a branch and re-introduced above it, identically, is live again.
 #[test]
 fn a_record_can_be_retracted_and_re_introduced_up_the_lineage() -> Result<()> {
     let f = Fixture::new()?;
@@ -156,7 +155,7 @@ fn a_record_can_be_retracted_and_re_introduced_up_the_lineage() -> Result<()> {
     Ok(())
 }
 
-/// A changeset is a windowed read of one layer: "what changed", never "what is" (spec §6.2).
+/// A changeset is a windowed read of one layer: "what changed", never "what is".
 #[test]
 fn a_changeset_is_a_windowed_read_of_one_layer() -> Result<()> {
     let f = Fixture::new()?;
@@ -179,7 +178,7 @@ fn a_changeset_is_a_windowed_read_of_one_layer() -> Result<()> {
     Ok(())
 }
 
-/// G1. The plain cycle: branch, work, merge down, drop. The base ends up holding exactly the
+/// The plain cycle: branch, work, merge down, drop. The base ends up holding exactly the
 /// base plus the work.
 #[test]
 fn a_branch_merges_down_and_is_dropped() -> Result<()> {
@@ -205,7 +204,7 @@ fn a_branch_merges_down_and_is_dropped() -> Result<()> {
     Ok(())
 }
 
-/// G2. A three-deep lineage merged leaf-first, verifying every intermediate frontier.
+/// A three-deep lineage merged leaf-first, verifying every intermediate frontier.
 #[test]
 fn a_lineage_merges_leaf_first() -> Result<()> {
     let f = Fixture::new()?;
@@ -243,7 +242,7 @@ fn a_lineage_merges_leaf_first() -> Result<()> {
     Ok(())
 }
 
-/// G3. Merging a layer down and dropping it while a child branch still forks off it. The
+/// Merging a layer down and dropping it while a child branch still forks off it. The
 /// child's next stack construction must fail loudly rather than read something wrong.
 #[test]
 fn dropping_a_layer_under_a_live_child_fails_loudly() -> Result<()> {
@@ -272,7 +271,7 @@ fn dropping_a_layer_under_a_live_child_fails_loudly() -> Result<()> {
     Ok(())
 }
 
-/// G4. Cherry-pick one commit — a `(layer, sequence interval)` window — into another branch,
+/// Cherry-pick one commit — a `(layer, sequence interval)` window — into another branch,
 /// and again, idempotently.
 #[test]
 fn a_commit_can_be_cherry_picked() -> Result<()> {
@@ -305,7 +304,7 @@ fn a_commit_can_be_cherry_picked() -> Result<()> {
     Ok(())
 }
 
-/// G5. Cherry-picking a delete: it bites where the target holds the record, and is a clean
+/// Cherry-picking a delete: it bites where the target holds the record, and is a clean
 /// no-op where the target never saw it.
 #[test]
 fn a_delete_can_be_cherry_picked() -> Result<()> {
@@ -333,7 +332,7 @@ fn a_delete_can_be_cherry_picked() -> Result<()> {
     Ok(())
 }
 
-/// G6. Revert: cherry-pick the inverse of a window — retract what it asserted, re-assert what
+/// Revert: cherry-pick the inverse of a window — retract what it asserted, re-assert what
 /// it retracted — and the frontier returns to what it was.
 #[test]
 fn a_window_can_be_reverted() -> Result<()> {
@@ -371,7 +370,7 @@ fn a_window_can_be_reverted() -> Result<()> {
     Ok(())
 }
 
-/// G7. Reset: re-fork at an earlier point. Heads never move backwards; stacks do.
+/// Reset: re-fork at an earlier point. Heads never move backwards; stacks do.
 #[test]
 fn a_branch_can_be_reset_by_re_forking() -> Result<()> {
     let f = Fixture::new()?;
@@ -398,7 +397,7 @@ fn a_branch_can_be_reset_by_re_forking() -> Result<()> {
     Ok(())
 }
 
-/// G10. The same record cherry-picked into two branches, both merged down: one copy survives
+/// The same record cherry-picked into two branches, both merged down: one copy survives
 /// and the second merge dedupes.
 #[test]
 fn convergent_picks_merge_to_one_copy() -> Result<()> {
@@ -423,9 +422,9 @@ fn convergent_picks_merge_to_one_copy() -> Result<()> {
     Ok(())
 }
 
-/// G11. A long chain of fork/merge cycles. The frontier stays correct throughout and the
-/// stack depth returns to one after every merge-down — the §6.2 discipline as an invariant
-/// rather than an assumption.
+/// A long chain of fork/merge cycles. The frontier stays correct throughout and the
+/// stack depth returns to one after every merge-down, so the merge-promptly discipline holds
+/// as an invariant rather than an assumption.
 #[test]
 fn a_long_chain_of_cycles_stays_correct() -> Result<()> {
     let f = Fixture::new()?;
@@ -462,7 +461,7 @@ fn a_long_chain_of_cycles_stays_correct() -> Result<()> {
 }
 
 /// Time travel composes with the structural bound rather than fighting it: the effective
-/// ceiling is the smaller of the two (spec §3.1).
+/// ceiling is the smaller of the two.
 #[test]
 fn a_query_bound_composes_with_a_layer_bound() -> Result<()> {
     let f = Fixture::new()?;

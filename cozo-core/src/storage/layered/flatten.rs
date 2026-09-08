@@ -1,5 +1,5 @@
 /*
- * Flatten: materialize the net effect of a windowed view into a stack's top layer (spec §5).
+ * Flatten: materialize the net effect of a windowed view into a stack's top layer.
  *
  * One primitive covers merge-down, changeset extraction and cherry-pick; they differ only in
  * the windows of the source view.
@@ -115,7 +115,7 @@ impl Db<LayeredStorage> {
             if rel.is_index {
                 // Copying index rows would splice two independently evolved graphs into
                 // something structurally invalid, whose only symptom is silent recall loss.
-                // The destination's indexes are dropped and rebuilt instead (spec §5).
+                // The destination's indexes are dropped and rebuilt instead.
                 continue;
             }
             if !rel.stackable {
@@ -135,7 +135,7 @@ impl Db<LayeredStorage> {
         }
 
         // 2. Decide each row against the destination, before writing anything: a flatten that
-        //    fails must leave `dst` byte-identical (spec §10.8 F6).
+        //    fails must leave `dst` byte-identical.
         let mut stats = FlattenStats::default();
         let mut to_write: Vec<(Vec<u8>, Vec<u8>)> = vec![];
         for row in net.iter() {
@@ -167,7 +167,7 @@ impl Db<LayeredStorage> {
             }
         }
 
-        // 3. Write, under the lock that orders commits (spec §4).
+        // 3. Write, under the lock that orders commits.
         let _ordered = inner
             .commit_lock
             .lock()
@@ -177,7 +177,7 @@ impl Db<LayeredStorage> {
             let mut key = key;
             if restamp {
                 // Without this, a later time-travel read of the destination would report the
-                // rows as present at sequences they were not (spec §5).
+                // rows as present at sequences they were not.
                 restamp_tail_validity(&mut key, seq);
             }
             stats.bytes_copied += (key.len() + val.len()) as u64;

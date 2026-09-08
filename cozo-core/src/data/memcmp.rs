@@ -92,7 +92,7 @@ fn validity_marker(ts: i64) -> [u8; 9] {
 /// Cozo's derived structures — an HNSW index's neighbour lists, for one — embed the key of the
 /// row they describe, validity included, rather than referring to it. A stamp assigned at
 /// commit therefore has to be rewritten wherever it was copied to, not only where the row's own
-/// key ends (spec §4).
+/// key ends.
 pub(crate) fn contains_validity_ts(buf: &[u8], ts: i64) -> bool {
     let marker = validity_marker(ts);
     buf.windows(marker.len()).any(|w| w == marker)

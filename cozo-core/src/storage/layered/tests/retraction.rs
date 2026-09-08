@@ -1,5 +1,5 @@
 /*
- * Cross-layer retraction (spec §10.6) — the subtlest correctness case in the specification.
+ * Cross-layer retraction — the subtlest correctness case in the design.
  */
 
 use miette::Result;
@@ -16,7 +16,7 @@ fn branch(f: &Fixture, name: &str) -> Result<(Stack, i64)> {
     ))
 }
 
-/// D1, D2. A retraction written in the top layer hides the lower layer's row through this
+/// A retraction written in the top layer hides the lower layer's row through this
 /// stack and only through this stack. The lower layer keeps its row: a stack that omits the
 /// retracting layer still sees it.
 #[test]
@@ -35,7 +35,7 @@ fn a_retraction_is_scoped_to_the_stack_that_wrote_it() -> Result<()> {
     Ok(())
 }
 
-/// D3. Retract then re-assert the identical value in the same layer: live again.
+/// Retract then re-assert the identical value in the same layer: live again.
 #[test]
 fn a_retraction_can_be_undone_in_place() -> Result<()> {
     let f = Fixture::new()?;
@@ -48,7 +48,7 @@ fn a_retraction_can_be_undone_in_place() -> Result<()> {
     Ok(())
 }
 
-/// D5. Time travel across a retraction: a sequence captured before it still shows the row
+/// Time travel across a retraction: a sequence captured before it still shows the row
 /// live, through the very stack that now hides it.
 #[test]
 fn history_survives_a_retraction() -> Result<()> {
@@ -63,7 +63,7 @@ fn history_survives_a_retraction() -> Result<()> {
     Ok(())
 }
 
-/// D6. Retracting a key no layer holds is legal and harmless — a cherry-picked delete whose
+/// Retracting a key no layer holds is legal and harmless — a cherry-picked delete whose
 /// record the target never saw. It costs a row that the next flatten's liveness check drops.
 #[test]
 fn retracting_the_never_existent_is_harmless() -> Result<()> {
@@ -79,7 +79,7 @@ fn retracting_the_never_existent_is_harmless() -> Result<()> {
 }
 
 /// A retraction stamped above a layer's ceiling is not visible, so the row it would have
-/// hidden emits (spec §10.5 R6).
+/// hidden emits.
 #[test]
 fn a_retraction_above_the_ceiling_does_not_bite() -> Result<()> {
     let f = Fixture::new()?;
@@ -96,7 +96,7 @@ fn a_retraction_above_the_ceiling_does_not_bite() -> Result<()> {
 }
 
 /// A hard delete cannot reach a lower layer, so the engine refuses it — deterministically,
-/// from the relation, not from where the row happens to sit (spec §3.4).
+/// from the relation, not from where the row happens to sit.
 ///
 /// Both attempts below fail identically: one names a row that lives in a lower layer, the
 /// other a row this stack wrote itself. Deciding per-key would make the error depend on
