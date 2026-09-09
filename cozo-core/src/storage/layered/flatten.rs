@@ -408,26 +408,39 @@ fn decode_values(val: &[u8]) -> Vec<DataValue> {
 }
 
 /// Everything a scan needs, bound for the life of one call.
-macro_rules! scan_context {
-    ($self:expr, $src:expr, $dst:expr, |$txn:ident, $src_l:ident, $dst_l:ident, $rels:ident| $body:block) => {{
-        let src_spec = $self.db.resolve($src)?;
-        let dst_spec = $self.db.resolve($dst)?;
-        let inner = &*$self.db.inner;
-        let $txn = inner.db.transaction();
-        let $src_l = bind_layers(inner, &src_spec)?;
-        let $dst_l = bind_layers(inner, &dst_spec)?;
+///
+/// Every field borrows from the open database, never from a sibling, so this is an ordinary
+/// struct rather than a self-referential one. That is also why the context is returned instead
+/// of being lent to a callback: `Transaction::commit` consumes the transaction, so `flatten`
+/// has to be able to move it out.
+struct ScanContext<'a> {
+    txn: LayeredTxn<'a>,
+    src_layers: Vec<BoundLayer<'a>>,
+    dst_layers: Vec<BoundLayer<'a>>,
+    relations: BTreeMap<u64, RelInfo>,
+}
+
+impl Db<LayeredStorage> {
+    fn scan_context<'a>(&'a self, src: &Stack, dst: &Stack) -> Result<ScanContext<'a>> {
+        let src_spec = self.db.resolve(src)?;
+        let dst_spec = self.db.resolve(dst)?;
+        let inner = &*self.db.inner;
+        let txn = inner.db.transaction();
+        let src_layers = bind_layers(inner, &src_spec)?;
+        let dst_layers = bind_layers(inner, &dst_spec)?;
         let catalog = inner
             .db
             .cf_handle(DEFAULT_LAYER)
             .ok_or_else(|| miette!("the default layer is missing"))?;
-        let $rels = catalog_relations(&$txn, &catalog)?;
-        #[allow(unused)]
-        let inner = inner;
-        $body
-    }};
-}
+        let relations = catalog_relations(&txn, &catalog)?;
+        Ok(ScanContext {
+            txn,
+            src_layers,
+            dst_layers,
+            relations,
+        })
+    }
 
-impl Db<LayeredStorage> {
     /// What [`Db::flatten`] would do, without doing it.
     ///
     /// Every check a flatten makes runs here — the view's net effect, dedupe, tombstone
@@ -439,36 +452,35 @@ impl Db<LayeredStorage> {
     ///
     /// A clean plan is not a promise: see [`FlattenPlan`] on staleness.
     pub fn flatten_plan(&self, src: &Stack, dst: &Stack) -> Result<FlattenPlan> {
-        scan_context!(self, src, dst, |txn, src_layers, dst_layers, relations| {
-            let mut plan = FlattenPlan::default();
-            scan(
-                &txn,
-                &src_layers,
-                &dst_layers,
-                &relations,
-                None,
-                |rel, effect| {
-                    match effect {
-                        RowEffect::Effective { key, val, .. } => {
-                            plan.stats.rows_copied += 1;
-                            plan.stats.bytes_copied += (key.len() + val.len()) as u64;
-                        }
-                        RowEffect::Redundant { .. } => plan.stats.rows_deduped += 1,
-                        RowEffect::Inert { .. } => plan.stats.tombstones_dropped += 1,
-                        RowEffect::Divergent {
-                            key,
-                            existing,
-                            incoming,
-                            kind,
-                        } => plan
-                            .conflicts
-                            .push(conflict_at(rel, key, existing, incoming, kind)),
+        let ctx = self.scan_context(src, dst)?;
+        let mut plan = FlattenPlan::default();
+        scan(
+            &ctx.txn,
+            &ctx.src_layers,
+            &ctx.dst_layers,
+            &ctx.relations,
+            None,
+            |rel, effect| {
+                match effect {
+                    RowEffect::Effective { key, val, .. } => {
+                        plan.stats.rows_copied += 1;
+                        plan.stats.bytes_copied += (key.len() + val.len()) as u64;
                     }
-                    Ok(ControlFlow::Continue(()))
-                },
-            )?;
-            Ok(plan)
-        })
+                    RowEffect::Redundant { .. } => plan.stats.rows_deduped += 1,
+                    RowEffect::Inert { .. } => plan.stats.tombstones_dropped += 1,
+                    RowEffect::Divergent {
+                        key,
+                        existing,
+                        incoming,
+                        kind,
+                    } => plan
+                        .conflicts
+                        .push(conflict_at(rel, key, existing, incoming, kind)),
+                }
+                Ok(ControlFlow::Continue(()))
+            },
+        )?;
+        Ok(plan)
     }
 
     /// One page of what [`Db::flatten`] would do, decoded.
@@ -487,53 +499,52 @@ impl Db<LayeredStorage> {
         after: Option<&FlattenCursor>,
         limit: usize,
     ) -> Result<FlattenPage> {
-        scan_context!(self, src, dst, |txn, src_layers, dst_layers, relations| {
-            let mut items = Vec::with_capacity(limit.min(1024));
-            let next = scan(
-                &txn,
-                &src_layers,
-                &dst_layers,
-                &relations,
-                after.map(|c| c.0.as_slice()),
-                |rel, effect| {
-                    if limit == 0 {
-                        return Ok(ControlFlow::Break(()));
-                    }
-                    let relation = rel.name.clone();
-                    items.push(match effect {
-                        RowEffect::Effective { key, val, .. } => FlattenItem::Copy {
-                            relation,
-                            key: decode_tuple_from_key(key, rel.n_keys),
-                            value: decode_values(val),
-                        },
-                        RowEffect::Redundant { key } => FlattenItem::Dedupe {
-                            relation,
-                            key: decode_tuple_from_key(key, rel.n_keys),
-                        },
-                        RowEffect::Inert { key } => FlattenItem::TombstoneDropped {
-                            relation,
-                            key: decode_tuple_from_key(key, rel.n_keys),
-                        },
-                        RowEffect::Divergent {
-                            key,
-                            existing,
-                            incoming,
-                            kind,
-                        } => FlattenItem::Conflict(conflict_at(
-                            rel, key, existing, incoming, kind,
-                        )),
-                    });
-                    Ok(if items.len() >= limit {
-                        ControlFlow::Break(())
-                    } else {
-                        ControlFlow::Continue(())
-                    })
-                },
-            )?;
-            Ok(FlattenPage {
-                items,
-                next: next.map(FlattenCursor),
-            })
+        let ctx = self.scan_context(src, dst)?;
+        let mut items = Vec::with_capacity(limit.min(1024));
+        let next = scan(
+            &ctx.txn,
+            &ctx.src_layers,
+            &ctx.dst_layers,
+            &ctx.relations,
+            after.map(|c| c.0.as_slice()),
+            |rel, effect| {
+                if limit == 0 {
+                    return Ok(ControlFlow::Break(()));
+                }
+                let relation = rel.name.clone();
+                items.push(match effect {
+                    RowEffect::Effective { key, val, .. } => FlattenItem::Copy {
+                        relation,
+                        key: decode_tuple_from_key(key, rel.n_keys),
+                        value: decode_values(val),
+                    },
+                    RowEffect::Redundant { key } => FlattenItem::Dedupe {
+                        relation,
+                        key: decode_tuple_from_key(key, rel.n_keys),
+                    },
+                    RowEffect::Inert { key } => FlattenItem::TombstoneDropped {
+                        relation,
+                        key: decode_tuple_from_key(key, rel.n_keys),
+                    },
+                    RowEffect::Divergent {
+                        key,
+                        existing,
+                        incoming,
+                        kind,
+                    } => FlattenItem::Conflict(conflict_at(
+                        rel, key, existing, incoming, kind,
+                    )),
+                });
+                Ok(if items.len() >= limit {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                })
+            },
+        )?;
+        Ok(FlattenPage {
+            items,
+            next: next.map(FlattenCursor),
         })
     }
 
@@ -557,81 +568,80 @@ impl Db<LayeredStorage> {
     /// that free. The commit lock is held for the whole call, not merely the writes, because
     /// the stamp is allocated before the first row is decided.
     pub fn flatten(&self, src: &Stack, dst: &Stack, restamp: bool) -> Result<FlattenStats> {
-        scan_context!(self, src, dst, |txn, src_layers, dst_layers, relations| {
-            let top = dst_layers[0].cf.clone();
-            if let Some(clash) = src_layers.iter().find(|l| l.name == dst_layers[0].name) {
-                bail!(
-                    "cannot flatten: layer '{}' is both the source of this flatten and the \
-                     destination's top layer",
-                    clash.name
-                );
-            }
+        let ctx = self.scan_context(src, dst)?;
+        let top = ctx.dst_layers[0].cf.clone();
+        if let Some(clash) = ctx.src_layers.iter().find(|l| l.name == ctx.dst_layers[0].name) {
+            bail!(
+                "cannot flatten: layer '{}' is both the source of this flatten and the \
+                 destination's top layer",
+                clash.name
+            );
+        }
 
-            // The stamp is commit order, so it has to be read where commits are serialized,
-            // and the batch has to land before the next commit proceeds.
-            let _ordered = self
-                .db
-                .inner
-                .commit_lock
-                .lock()
-                .map_err(|_| miette!("commit lock poisoned"))?;
-            let seq = self.db.inner.next_stamp();
+        // The stamp is commit order, so it has to be read where commits are serialized,
+        // and the batch has to land before the next commit proceeds.
+        let _ordered = self
+            .db
+            .inner
+            .commit_lock
+            .lock()
+            .map_err(|_| miette!("commit lock poisoned"))?;
+        let seq = self.db.inner.next_stamp();
 
-            let mut stats = FlattenStats::default();
-            let mut conflicts = vec![];
-            let mut failed = None;
-            scan(
-                &txn,
-                &src_layers,
-                &dst_layers,
-                &relations,
-                None,
-                |rel, effect| {
-                    match effect {
-                        RowEffect::Effective { key, val, .. } => {
-                            let mut key = key.to_vec();
-                            if restamp {
-                                // Without this, a later time-travel read of the destination
-                                // would report the rows as present at sequences they were not.
-                                restamp_tail_validity(&mut key, seq);
-                            }
-                            stats.rows_copied += 1;
-                            stats.bytes_copied += (key.len() + val.len()) as u64;
-                            // Writing as we go is safe because each identity is visited once:
-                            // no later liveness check can read a row this loop just wrote.
-                            if let Err(err) = txn.put_cf(&top, &key, val) {
-                                failed = Some(err);
-                                return Ok(ControlFlow::Break(()));
-                            }
+        let mut stats = FlattenStats::default();
+        let mut conflicts = vec![];
+        let mut failed = None;
+        scan(
+            &ctx.txn,
+            &ctx.src_layers,
+            &ctx.dst_layers,
+            &ctx.relations,
+            None,
+            |rel, effect| {
+                match effect {
+                    RowEffect::Effective { key, val, .. } => {
+                        let mut key = key.to_vec();
+                        if restamp {
+                            // Without this, a later time-travel read of the destination
+                            // would report the rows as present at sequences they were not.
+                            restamp_tail_validity(&mut key, seq);
                         }
-                        RowEffect::Redundant { .. } => stats.rows_deduped += 1,
-                        RowEffect::Inert { .. } => stats.tombstones_dropped += 1,
-                        RowEffect::Divergent {
-                            key,
-                            existing,
-                            incoming,
-                            kind,
-                        } => conflicts.push(conflict_at(rel, key, existing, incoming, kind)),
+                        stats.rows_copied += 1;
+                        stats.bytes_copied += (key.len() + val.len()) as u64;
+                        // Writing as we go is safe because each identity is visited once:
+                        // no later liveness check can read a row this loop just wrote.
+                        if let Err(err) = ctx.txn.put_cf(&top, &key, val) {
+                            failed = Some(err);
+                            return Ok(ControlFlow::Break(()));
+                        }
                     }
-                    Ok(ControlFlow::Continue(()))
-                },
-            )?;
-            if let Some(err) = failed {
-                return Err(err).into_diagnostic().wrap_err("failed to write a flattened row");
-            }
-            if !conflicts.is_empty() {
-                // Dropping the transaction unwritten is what makes a failed flatten a no-op.
-                bail!("{}", describe_conflicts(&conflicts));
-            }
-            if restamp {
-                // A flatten is one transaction, so it is one point in commit order.
-                stats.seq_range = Some((seq, seq));
-            }
-            txn.commit()
-                .into_diagnostic()
-                .wrap_err("failed to commit the flatten")?;
-            Ok(stats)
-        })
+                    RowEffect::Redundant { .. } => stats.rows_deduped += 1,
+                    RowEffect::Inert { .. } => stats.tombstones_dropped += 1,
+                    RowEffect::Divergent {
+                        key,
+                        existing,
+                        incoming,
+                        kind,
+                    } => conflicts.push(conflict_at(rel, key, existing, incoming, kind)),
+                }
+                Ok(ControlFlow::Continue(()))
+            },
+        )?;
+        if let Some(err) = failed {
+            return Err(err).into_diagnostic().wrap_err("failed to write a flattened row");
+        }
+        if !conflicts.is_empty() {
+            // Dropping the transaction unwritten is what makes a failed flatten a no-op.
+            bail!("{}", describe_conflicts(&conflicts));
+        }
+        if restamp {
+            // A flatten is one transaction, so it is one point in commit order.
+            stats.seq_range = Some((seq, seq));
+        }
+        ctx.txn.commit()
+            .into_diagnostic()
+            .wrap_err("failed to commit the flatten")?;
+        Ok(stats)
     }
 }
 
