@@ -1,5 +1,5 @@
 /*
- * Cross-layer retraction — the subtlest correctness case in the design.
+ * Cross-layer retraction: the subtlest correctness case in the design.
  */
 
 use miette::Result;
@@ -63,7 +63,7 @@ fn history_survives_a_retraction() -> Result<()> {
     Ok(())
 }
 
-/// Retracting a key no layer holds is legal and harmless — a cherry-picked delete whose
+/// Retracting a key no layer holds is legal and harmless: a cherry-picked delete whose
 /// record the target never saw. It costs a row that the next flatten's liveness check drops.
 #[test]
 fn retracting_the_never_existent_is_harmless() -> Result<()> {
@@ -95,7 +95,7 @@ fn a_retraction_above_the_ceiling_does_not_bite() -> Result<()> {
     Ok(())
 }
 
-/// A hard delete cannot reach a lower layer, so the engine refuses it — deterministically,
+/// A hard delete cannot reach a lower layer, so the engine refuses it deterministically,
 /// from the relation, not from where the row happens to sit.
 ///
 /// Both attempts below fail identically: one names a row that lives in a lower layer, the

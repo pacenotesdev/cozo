@@ -65,7 +65,7 @@ fn an_absent_key_stays_absent() -> Result<()> {
 ///
 /// Value immutability means two layers can never legitimately disagree about a
 /// key's *value*, so "the topmost layer wins" is observable as deduplication here and as
-/// precedence in the retraction case below — never as one value beating another.
+/// precedence in the retraction case below, never as one value beating another.
 #[test]
 fn a_scan_merges_in_key_order_and_emits_each_key_once() -> Result<()> {
     let f = Fixture::new()?;
@@ -164,8 +164,8 @@ fn relations_do_not_leak_across_layers() -> Result<()> {
     Ok(())
 }
 
-/// Bounded scans — the shape of upstream's stored-relation `prefix_join` regression
-/// (commit `ff9a4fce`) — behave across layers as they do on one.
+/// Bounded scans, the shape of upstream's stored-relation `prefix_join` regression
+/// (commit `ff9a4fce`), behave across layers as they do on one.
 #[test]
 fn bounded_scans_compose_across_layers() -> Result<()> {
     let f = Fixture::new()?;

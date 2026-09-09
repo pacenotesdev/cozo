@@ -117,7 +117,7 @@ impl<'a> LayeredTx<'a> {
     /// The gate a multi-layer stack puts in front of every key it touches.
     ///
     /// Stackability is decided at relation creation and read back from the catalog here, so
-    /// the answer depends on the relation alone — not on which layer a particular row happens
+    /// the answer depends on the relation alone, not on which layer a particular row happens
     /// to sit in, and not on whether the operation would have found anything. It fails before
     /// any row is read, which is the whole point of checking it here rather than at delete time.
     fn gate(&self, key: &[u8], destructive: bool) -> Result<()> {
@@ -139,11 +139,11 @@ impl<'a> LayeredTx<'a> {
             return Ok(());
         };
         let Some(info) = self.relations()?.get(&rel_id) else {
-            // A relation the catalog has not caught up with — a definition written earlier in
+            // A relation the catalog has not caught up with: a definition written earlier in
             // this same transaction. It cannot be older than this stack, so let it through.
             return Ok(());
         };
-        // Index relations are exempt. They hold no user records — nothing anyone retracts —
+        // Index relations are exempt. They hold no user records (nothing anyone retracts),
         // and the engine maintains them inside whichever layer is being written. Reads compose
         // through the stack by exact key, and a stack topology change invalidates them anyway:
         // the remedy is drop-and-rebuild, not a retraction.
@@ -184,7 +184,7 @@ impl<'a> LayeredTx<'a> {
     }
 }
 
-/// What a stack currently says about one key's identity — everything a write-path or flatten
+/// What a stack currently says about one key's identity: everything a write-path or flatten
 /// decision needs.
 pub(crate) struct KeyState {
     /// Whether the newest visible version asserts.
@@ -196,8 +196,8 @@ pub(crate) struct KeyState {
 
 /// Every visible version of one key's identity, newest first.
 ///
-/// The version chain of a key is short by construction — a record is created, perhaps
-/// retracted, perhaps re-introduced — so this collects rather than streaming.
+/// The version chain of a key is short by construction (a record is created, perhaps
+/// retracted, perhaps re-introduced), so this collects rather than streaming.
 pub(crate) fn version_chain(
     txn: &LayeredTxn<'_>,
     layers: &[BoundLayer<'_>],
@@ -284,7 +284,7 @@ impl<'s> StoreTx<'s> for LayeredTx<'s> {
         let target = self.write_target(key);
         let vld = tail_validity(key);
         let stamped = matches!(vld, Some(v) if v.timestamp.0 .0 == PENDING_SEQ);
-        // A derived row — an index entry — carries the stamped key of the row it describes
+        // A derived row, such as an index entry, carries the stamped key of the row it describes
         // rather than referring to it, so the pending stamp can be anywhere in either half.
         let carries_pending =
             stamped || contains_validity_ts(key, PENDING_SEQ) || contains_validity_ts(val, PENDING_SEQ);
@@ -302,7 +302,7 @@ impl<'s> StoreTx<'s> for LayeredTx<'s> {
 
         // A key's value is immutable; its visibility is not. Re-asserting the
         // identical value is how a retracted record is re-introduced; asserting a different
-        // one — over a live row or a tombstoned one — is backdoor mutability, and merge
+        // one (over a live row or a tombstoned one) is backdoor mutability, and merge
         // soundness rests on it never happening.
         if stamped && vld.map_or(false, |v| v.is_assert.0) {
             let state = key_state(self.txn()?, &self.layers, key)?;

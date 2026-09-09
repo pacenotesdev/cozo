@@ -385,7 +385,7 @@ fn merging_is_idempotent() -> Result<()> {
 }
 
 /// Merging two branches commutes whenever no key is retracted in one and asserted in the
-/// other — which, with keys that are collision-free by construction, is the ordinary case.
+/// other. With keys that are collision-free by construction, that is the ordinary case.
 #[test]
 fn disjoint_merges_commute() -> Result<()> {
     fn build(order: [&str; 2]) -> Result<BTreeMap<String, String>> {
@@ -474,7 +474,7 @@ fn a_fork_merge_round_trip_matches_direct_work() -> Result<()> {
 }
 
 /// Picking a window and then reverting it leaves the frontier where it started. Tombstone
-/// counts differ — the history remembers both moves — but the frontier must not.
+/// counts differ (the history remembers both moves), but the frontier must not.
 #[test]
 fn a_pick_and_its_revert_cancel() -> Result<()> {
     let f = Fixture::new()?;

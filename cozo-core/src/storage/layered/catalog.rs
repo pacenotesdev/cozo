@@ -36,8 +36,13 @@ pub(crate) struct RelInfo {
 
 /// Every relation in the store, by relation id.
 ///
-/// The catalog is global — one copy, in the default layer — so this is the same answer through
+/// The catalog is global (one copy, in the default layer), so this is the same answer through
 /// every stack.
+///
+/// The map is ordered by relation id, and callers depend on it. A row's key begins with its
+/// relation id, big-endian, so id order is keyspace order: iterating `values()` visits
+/// relations in the order their rows appear on disk. `scan` in `flatten.rs` relies on that to
+/// resume a paged scan from a single key.
 pub(crate) fn catalog_relations(
     txn: &LayeredTxn<'_>,
     catalog: &Arc<BoundColumnFamily<'_>>,

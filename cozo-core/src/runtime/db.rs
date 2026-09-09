@@ -259,8 +259,8 @@ pub enum TransactionPayload {
 }
 
 impl<S: Clone> Db<S> {
-    /// The same database, reached through a different storage handle. Everything else —
-    /// relation locks, callbacks, running queries, the temp store — is shared, so the two
+    /// The same database, reached through a different storage handle. Everything else
+    /// (relation locks, callbacks, running queries, the temp store) is shared, so the two
     /// handles are the same database in every respect except how storage is addressed.
     #[allow(dead_code)]
     pub(crate) fn with_storage(&self, db: S) -> Self {

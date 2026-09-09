@@ -3,8 +3,9 @@
  *
  * Two conventions matter throughout:
  *
- * *Never hardcode sequence numbers.* They are sparse — the counter advances on every write to
- * the instance, not only ours — so every expectation is derived from a stamp the test read back
+ * *Never hardcode sequence numbers.* They are sparse, because the counter advances on every
+ * write to the instance and not only ours, so every expectation is derived from a stamp the
+ * test read back
  * out of the store or captured from `current_seq()`.
  *
  * *Say which equivalence is meant.* `live()` compares frontiers: what a stack resolves to now.
@@ -50,7 +51,7 @@ pub(crate) struct Fixture {
     pub db: Db<LayeredStorage>,
 }
 
-/// The default layer, unwindowed — the base of every fixture.
+/// The default layer, unwindowed: the base of every fixture.
 pub(crate) fn base() -> Stack {
     vec![LayerRef::new("default")]
 }

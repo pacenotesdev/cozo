@@ -78,8 +78,8 @@ fn an_identical_value_undeletes() -> Result<()> {
 }
 
 /// The invisible collision. A parent acquires a key above the branch's bound, with a
-/// different value; the branch asserts it too. The write *must* succeed — the conflicting row
-/// is unknowable through this stack — and the merge must be what fails.
+/// different value; the branch asserts it too. The write *must* succeed, because the conflicting row
+/// is unknowable through this stack, and the merge must be what fails.
 #[test]
 fn a_collision_invisible_to_the_branch_is_caught_at_the_merge() -> Result<()> {
     let f = Fixture::new()?;

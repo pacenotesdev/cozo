@@ -37,8 +37,8 @@ impl Window {
     ///
     /// A row with no validity carries no sequence, so no window excludes it: a window selects
     /// by *when*, and such a row has no when. The relations this applies to are index
-    /// relations — everything else without a validity is refused by a multi-layer stack
-    /// altogether — and it is what makes an index compose through a stack at all:
+    /// relations (everything else without a validity is refused by a multi-layer stack
+    /// altogether), and it is what makes an index compose through a stack at all:
     /// a bounded base layer must keep contributing its edges, or traversal from a branch sees
     /// only the branch's own nodes and silently loses the rest.
     pub(crate) fn admits(&self, key: &[u8]) -> bool {
@@ -153,11 +153,10 @@ impl<'a> LayerIter<'a> {
 /// validity, which sorts descending, so every version of a relation key arrives newest-first
 /// across the whole stack, irrespective of which layer holds it.
 ///
-/// Shadowing between layers is therefore not positional. It falls out of the ordinary
-/// single-store validity rule, applied downstream by [`StackSkipIter`] to that newest-first
-/// stream: the winner is the newest version, which is the topmost layer's only when the
-/// topmost layer is also the one that wrote most recently. Stack position decides exactly one
-/// thing — which copy of a byte-identical key is emitted.
+/// Shadowing between layers is therefore not positional. [`StackSkipIter`] applies the
+/// ordinary single-store validity rule to that newest-first stream, so the winner is the
+/// newest version, whichever layer holds it. Stack position decides only which copy of a
+/// byte-identical key is emitted.
 ///
 /// Layers are compared linearly rather than through a heap: a stack is a short-lived divergence
 /// merged down promptly, so depth stays in the single digits and a scan of the array
@@ -194,7 +193,7 @@ impl<'a> StackMerge<'a> {
             match best {
                 None => best = Some(idx),
                 // Strictly less, so a tie leaves the slot with the earlier (higher) layer.
-                // A tie is byte-identical keys — same relation key *and* same stamp — so this
+                // A tie is byte-identical keys (same relation key *and* same stamp), so this
                 // chooses which copy of one row to emit. It does not decide which version of a
                 // key wins; the stamp does, in `StackSkipIter`.
                 Some(b) => {

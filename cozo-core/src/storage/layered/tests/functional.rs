@@ -271,7 +271,7 @@ fn dropping_a_layer_under_a_live_child_fails_loudly() -> Result<()> {
     Ok(())
 }
 
-/// Cherry-pick one commit — a `(layer, sequence interval)` window — into another branch,
+/// Cherry-pick one commit (a `(layer, sequence interval)` window) into another branch,
 /// and again, idempotently.
 #[test]
 fn a_commit_can_be_cherry_picked() -> Result<()> {
@@ -332,8 +332,8 @@ fn a_delete_can_be_cherry_picked() -> Result<()> {
     Ok(())
 }
 
-/// Revert: cherry-pick the inverse of a window — retract what it asserted, re-assert what
-/// it retracted — and the frontier returns to what it was.
+/// Revert: cherry-pick the inverse of a window, retracting what it asserted and re-asserting
+/// what it retracted, and the frontier returns to what it was.
 #[test]
 fn a_window_can_be_reverted() -> Result<()> {
     let f = Fixture::new()?;

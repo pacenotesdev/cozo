@@ -40,7 +40,7 @@ pub trait Storage<'s>: Send + Sync + Clone {
     /// What `'NOW'` means to this engine when a script is run.
     ///
     /// The default is wall-clock time, which is what a single-store engine has to use. An
-    /// engine that assigns validity itself — the layered engine stamps commit order — returns
+    /// engine that assigns validity itself (the layered engine stamps commit order) returns
     /// its own marker instead, so that scripts run through the ordinary entry points are
     /// stamped the same way as those run through the engine's own.
     fn now_validity(&self) -> ValidityTs {

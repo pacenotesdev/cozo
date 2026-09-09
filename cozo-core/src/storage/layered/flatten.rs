@@ -45,15 +45,13 @@ pub enum ConflictKind {
     /// source spans branches that forked from a common base and never saw one another's
     /// writes, so each write was legal where it was made.
     ///
-    /// This detects disagreement about a *value*, and only that. It is not a three-way merge:
-    /// one branch retracting a key while another asserts it is not reported here, because a
-    /// retraction followed by an assertion is also what ordinary undeleting looks like within
-    /// a single lineage, and the two are indistinguishable without per-row layer provenance.
-    /// Differing values need no provenance — under value immutability a write that could see
-    /// the other value would have been refused, so the difference is itself the evidence.
+    /// Covers disagreement about a value only. One branch retracting a key while another
+    /// asserts it is not reported: within a single lineage that is ordinary undeleting, and
+    /// the two are indistinguishable without per-row layer provenance. Differing values need
+    /// no provenance, since a write able to see the other value would have been refused.
     ///
-    /// Merging branches that have diverged means scanning each against their common base and
-    /// adjudicating the two results, where which side did what is known by construction.
+    /// Merging diverged branches means scanning each against their common base and
+    /// adjudicating the results, where each side's contribution is known separately.
     Source,
 }
 
@@ -82,8 +80,8 @@ pub struct FlattenConflict {
 
 /// What a flatten *would* do, computed without writing anything.
 ///
-/// This is the same computation [`Db::flatten`] performs before it writes — resolving the
-/// view's net effect and deciding each row against the destination's liveness — so a caller
+/// This is the same computation [`Db::flatten`] performs before it writes: resolving the
+/// view's net effect and deciding each row against the destination's liveness. A caller
 /// that needs to preview a merge, or to report its conflicts, does not have to reproduce it.
 ///
 /// A plan is not a lock. It is subject to the same caveat as the flatten itself: nothing here
@@ -162,13 +160,8 @@ pub struct FlattenPage {
 
 /// What one resolved source row means against the destination, borrowed from the scan.
 ///
-/// Named for what the row *is* rather than for what a flatten does about it, because the scan
-/// is not flatten's alone: a diff reads the same stream and classifies it differently — an
-/// effective assertion is an addition, an effective retraction a removal.
-///
-/// Nothing here is owned. A caller that only counts rows allocates nothing; a caller that
-/// renders them decides for itself what to build. That asymmetry is the point: conflicts are
-/// bounded by construction and worth materializing, rows are not.
+/// Nothing here is owned: a caller that counts rows allocates nothing, and a caller that
+/// renders them chooses what to build. Conflicts are bounded by construction; rows are not.
 enum RowEffect<'r> {
     /// The destination does not already agree: applying this row would change it.
     Effective {
@@ -266,6 +259,14 @@ where
 /// may stop early; the returned key is where a later call should resume from, and is `None`
 /// when the scan ran to the end.
 ///
+/// `relations` is the catalog, every relation the store holds, read once per transaction.
+/// It is the scan's outer loop. Each entry gives the key range for that relation's rows,
+/// the policy for it (`is_index`, `stackable`), and the `RelInfo` passed on to `visit`.
+///
+/// It must be ordered by relation id. Ids sit big-endian at the head of every key, so id
+/// order is keyspace order, which is what lets `after` be a single key: a relation an earlier
+/// page finished is skipped by comparing `after` against its upper bound.
+///
 /// Resolution happens *within the view first*: a record created and retracted inside the
 /// window contributes its tombstone and only that, which is why the merge is drained per
 /// identity rather than per row.
@@ -325,7 +326,7 @@ where
         merge.seek(&start)?;
 
         // One identity at a time, and only O(1) of it: the newest version, the newest
-        // assertive value, and one assertion that disagrees with it. Never the chain — a
+        // assertive value, and one assertion that disagrees with it. Never the chain: a
         // record asserted and retracted many times has a long one.
         let mut cur: Option<Resolved> = None;
         while let Some(row) = merge.next_kv() {
@@ -409,10 +410,9 @@ fn decode_values(val: &[u8]) -> Vec<DataValue> {
 
 /// Everything a scan needs, bound for the life of one call.
 ///
-/// Every field borrows from the open database, never from a sibling, so this is an ordinary
-/// struct rather than a self-referential one. That is also why the context is returned instead
-/// of being lent to a callback: `Transaction::commit` consumes the transaction, so `flatten`
-/// has to be able to move it out.
+/// Every field borrows from the open database rather than from a sibling, so this is an
+/// ordinary struct. It is returned rather than lent to a callback because
+/// `Transaction::commit` consumes the transaction.
 struct ScanContext<'a> {
     txn: LayeredTxn<'a>,
     src_layers: Vec<BoundLayer<'a>>,
@@ -443,8 +443,8 @@ impl Db<LayeredStorage> {
 
     /// What [`Db::flatten`] would do, without doing it.
     ///
-    /// Every check a flatten makes runs here — the view's net effect, dedupe, tombstone
-    /// liveness against the whole destination stack — so a merge can be previewed, and its
+    /// Every check a flatten makes runs here: the view's net effect, dedupe, and tombstone
+    /// liveness against the whole destination stack. A merge can be previewed, and its
     /// conflicts reported in full, without the caller reimplementing any of it.
     ///
     /// Memory is proportional to the number of conflicts, not to the size of the view: rows are
@@ -486,7 +486,7 @@ impl Db<LayeredStorage> {
     /// One page of what [`Db::flatten`] would do, decoded.
     ///
     /// Pass `after: None` for the first page and the previous page's `next` thereafter. Each
-    /// call is self-contained — it opens a transaction, reads its page and closes — so no
+    /// call is self-contained (it opens a transaction, reads its page and closes), so no
     /// snapshot is held while a caller decides what to do with the rows.
     ///
     /// Consecutive pages are therefore *not* one snapshot: a write landing between them is
@@ -563,7 +563,7 @@ impl Db<LayeredStorage> {
     /// `dst`'s top layer may not appear in `src`: the scan reads the source while the write
     /// lands in that layer, and a layer that is both would be read as it is written.
     ///
-    /// This specifies no atomicity against concurrent writers on either stack — the caller must
+    /// This specifies no atomicity against concurrent writers on either stack: the caller must
     /// quiesce. The intended pattern, flattening sealed layers into a single-writer head, makes
     /// that free. The commit lock is held for the whole call, not merely the writes, because
     /// the stamp is allocated before the first row is decided.
@@ -650,7 +650,7 @@ impl Db<LayeredStorage> {
 fn describe_conflicts(conflicts: &[FlattenConflict]) -> String {
     const SHOWN: usize = 5;
     let mut msg = format!(
-        "flatten aborted: {} key(s) collide — the destination already holds a different value \
+        "flatten aborted: {} key(s) collide; the destination already holds a different value \
          under a key the view asserts",
         conflicts.len()
     );

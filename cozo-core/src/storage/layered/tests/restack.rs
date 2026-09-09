@@ -1,14 +1,12 @@
-    /*
- * Re-parenting a layer onto a base it was not authored over — the "restack" family.
+/*
+ * Re-parenting a layer onto a base it was not authored over: the "restack" family.
  *
  * A stack is composed per query, so re-parenting needs no operation: it is just a different
- * `Vec<LayerRef>`. What these tests pin down is what that composition *means*, because the
- * rest of the suite cannot ask. Everywhere else, each lower layer is bounded at the fork the
- * upper layer was taken from, which makes it structurally impossible for a lower layer to hold
- * a newer stamp than the layer above it. Under that discipline "the topmost layer wins" and
- * "the newest stamp wins" agree on every input and no test can tell them apart.
- *
- * These stacks break that discipline deliberately.
+ * `Vec<LayerRef>`. These tests cover what that composition means when the stack is not a
+ * lineage. Elsewhere every lower layer is bounded at the fork its upper layer was taken from,
+ * so a lower layer can never hold a newer stamp than the layer above it, and "topmost wins"
+ * and "newest stamp wins" agree on every input. The stacks here break that bounding, which is
+ * what makes the two rules distinguishable.
  */
 
 use miette::Result;
@@ -78,7 +76,7 @@ fn a_sibling_can_be_restacked_underneath() -> Result<()> {
 
 /// A layer read over a base clipped *below* the fork it was authored over. Windows are
 /// per-layer, so lowering the base's ceiling withdraws the base's later rows and leaves the
-/// layer's own content untouched — even though every row in it postdates the new ceiling.
+/// layer's own content untouched, even though every row in it postdates the new ceiling.
 #[test]
 fn restacking_below_the_fork_keeps_the_layer_intact() -> Result<()> {
     let f = Fixture::new()?;
@@ -117,7 +115,7 @@ fn restacking_below_the_fork_keeps_the_layer_intact() -> Result<()> {
 /// single-store validity rule decides from there.
 ///
 /// Under value immutability this is observable only through retraction, which is why the rest
-/// of the suite — where lower layers are always bounded at a fork, and so always older — never
+/// of the suite, where lower layers are always bounded at a fork and so always older, never
 /// has to choose between the two readings.
 #[test]
 fn precedence_follows_the_stamp_not_the_stack_position() -> Result<()> {
@@ -136,7 +134,7 @@ fn precedence_follows_the_stamp_not_the_stack_position() -> Result<()> {
     let retracted = f.retract_rec(&lower, "under")?;
     assert!(retracted > asserted, "the lower layer holds the newer stamp");
 
-    // Older retraction underneath a newer assertion — the mirror, and the case the rest of the
+    // Older retraction underneath a newer assertion: the mirror, and the case the rest of the
     // suite exercises.
     f.retract_rec(&lower, "over")?;
     let revived = f.assert_rec(&upper, "over", "v2")?;

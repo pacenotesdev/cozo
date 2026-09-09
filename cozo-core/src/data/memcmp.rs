@@ -45,7 +45,7 @@ pub(crate) const VLD_ENCODED_LEN: usize = 1 + 8 + 1;
 ///
 /// This is a byte-level probe rather than a decode: it recognises the fixed ten-byte
 /// tail that [`MemCmpEncoder::encode_datavalue`] writes for a validity. A key whose final
-/// component is *not* a validity can in principle end in the same shape — see
+/// component is *not* a validity can in principle end in the same shape. See
 /// [`key_ends_in_validity`] for the exact check that debug builds assert against.
 pub(crate) fn tail_validity(key: &[u8]) -> Option<Validity> {
     if key.len() < VLD_ENCODED_LEN {
@@ -63,8 +63,8 @@ pub(crate) fn tail_validity(key: &[u8]) -> Option<Validity> {
     })
 }
 
-/// Split an encoded key that ends in a validity into its identity — everything but the
-/// validity — and the scan range covering every version of that identity.
+/// Split an encoded key that ends in a validity into its identity (everything but the
+/// validity) and the scan range covering every version of that identity.
 ///
 /// A validity is always the last key component of the relation that has one, so the range
 /// `[identity ++ VLD_TAG, identity ++ VLD_TAG+1)` is exactly that key's version chain.
@@ -89,7 +89,7 @@ fn validity_marker(ts: i64) -> [u8; 9] {
 
 /// Whether a buffer contains an encoded validity stamped `ts`, anywhere.
 ///
-/// Cozo's derived structures — an HNSW index's neighbour lists, for one — embed the key of the
+/// Cozo's derived structures, an HNSW index's neighbour lists for one, embed the key of the
 /// row they describe, validity included, rather than referring to it. A stamp assigned at
 /// commit therefore has to be rewritten wherever it was copied to, not only where the row's own
 /// key ends.

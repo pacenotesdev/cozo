@@ -47,7 +47,7 @@ fn a_dropped_layer_does_not_resurrect() -> Result<()> {
 }
 
 /// Layers and their contents survive a reopen, and stacks rebuild from consumer-held
-/// metadata — the fork point is just a number the consumer wrote down.
+/// metadata: the fork point is just a number the consumer wrote down.
 #[test]
 fn layers_persist_across_a_reopen() -> Result<()> {
     let dir = TempDir::new().unwrap();
@@ -177,7 +177,7 @@ fn the_catalog_is_global_and_contents_are_local() -> Result<()> {
     Ok(())
 }
 
-/// Stackability is settled when the relation is created — a validity column or not — and
+/// Stackability is settled when the relation is created (a validity column or not), and
 /// enforced whenever the relation is reached through a multi-layer stack, before any row is
 /// read. The same relation through a single-layer stack works normally.
 #[test]

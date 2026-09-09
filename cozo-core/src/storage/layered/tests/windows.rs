@@ -31,7 +31,7 @@ fn the_window_is_half_open() -> Result<()> {
     Ok(())
 }
 
-/// `since == bound` is a legal, empty window — the natural changeset of a fork with no work.
+/// `since == bound` is a legal, empty window: the natural changeset of a fork with no work.
 #[test]
 fn an_empty_window_is_legal() -> Result<()> {
     let f = Fixture::new()?;
@@ -78,7 +78,7 @@ fn a_floor_hides_the_frontier() -> Result<()> {
     f.assert_rec(&base(), "fresh", "v2")?;
 
     let changeset: Stack = vec![LayerRef::windowed("default", Some(established), None)];
-    // Not `established` at its old value — no `established` at all.
+    // Not `established` at its old value: no `established` at all.
     assert_eq!(f.live(&changeset, None)?, frontier(&[("fresh", "v2")]));
     Ok(())
 }

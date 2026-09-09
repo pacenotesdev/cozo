@@ -177,7 +177,7 @@ fn without_restamping_the_authoring_stamps_survive() -> Result<()> {
 
     let stamps: Vec<_> = f.versions(&base())?.into_iter().map(|v| v.seq).collect();
     assert_eq!(stamps, vec![authored]);
-    // A read of the base as of the authoring sequence now shows the row — which is exactly the
+    // A read of the base as of the authoring sequence now shows the row, which is exactly the
     // historical inaccuracy restamping exists to avoid.
     assert_eq!(f.live(&base(), Some(authored))?, frontier(&[("k", "v1")]));
     Ok(())
@@ -221,8 +221,8 @@ fn an_empty_view_is_a_no_op() -> Result<()> {
     Ok(())
 }
 
-/// Flattening into a destination whose top layer already holds unmerged work — a
-/// cherry-pick into an active branch — leaves that work alone, and checks against the whole
+/// Flattening into a destination whose top layer already holds unmerged work (a
+/// cherry-pick into an active branch) leaves that work alone, and checks against the whole
 /// destination stack.
 #[test]
 fn flattening_into_a_dirty_head_leaves_its_work_alone() -> Result<()> {
@@ -348,7 +348,7 @@ fn a_conflicted_flatten_names_what_collided() -> Result<()> {
     Ok(())
 }
 
-/// A plan of a view that changes nothing is clean and empty — the same no-op the flatten is.
+/// A plan of a view that changes nothing is clean and empty: the same no-op the flatten is.
 #[test]
 fn an_empty_plan_is_clean() -> Result<()> {
     let f = Fixture::new()?;
@@ -515,7 +515,7 @@ fn siblings_in_one_source_view_do_not_resolve_by_stamp() -> Result<()> {
     Ok(())
 }
 
-/// Siblings that agree — the same record cherry-picked into both — are not a conflict. One
+/// Siblings that agree (the same record cherry-picked into both) are not a conflict. One
 /// copy is written and the duplicate authoring is deduped away.
 #[test]
 fn siblings_that_agree_are_not_a_conflict() -> Result<()> {

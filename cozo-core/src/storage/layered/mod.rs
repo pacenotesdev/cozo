@@ -33,7 +33,7 @@ pub(crate) mod tx;
 mod tests;
 
 /// A storage sequence number. This is RocksDB's own commit-order counter, reinterpreted as
-/// Cozo's validity timestamp — it is not a wall clock, and it is sparse.
+/// Cozo's validity timestamp. It is not a wall clock, and it is sparse.
 pub type Seq = i64;
 
 /// The stamp a row carries between `put` and `commit`, before commit order is known.
@@ -93,7 +93,7 @@ impl LayerRef {
         }
     }
 
-    /// The layer as of `bound` — a fork point.
+    /// The layer as of `bound`, a fork point.
     pub fn bounded(id: impl Into<LayerId>, bound: Seq) -> Self {
         Self {
             id: id.into(),
@@ -286,7 +286,7 @@ impl<'s> Storage<'s> for LayeredStorage {
 
     fn now_validity(&self) -> ValidityTs {
         // The sequence is assigned by storage at commit, so `'NOW'` is the pending stamp
-        // rather than a clock reading — including for the ordinary entry points, which run
+        // rather than a clock reading, including for the ordinary entry points, which run
         // against a single-layer stack on the default layer.
         vld_at(PENDING_SEQ)
     }
@@ -337,7 +337,7 @@ impl<'s> Storage<'s> for LayeredStorage {
         let mut highest_stamp: Option<Seq> = None;
         for result in data {
             let (key, val) = result?;
-            // Rows arrive pre-encoded here — this is the restore path — and keep the stamps
+            // Rows arrive pre-encoded here (this is the restore path) and keep the stamps
             // they were written with. That is right for reconstructing a store, and wrong the
             // moment the stamps outrun the instance's own counter, which is checked below.
             if let Some(vld) = crate::data::memcmp::tail_validity(&key) {
