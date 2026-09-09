@@ -30,6 +30,8 @@ pub(crate) struct RelInfo {
     /// Index relations store their structure as ordinary rows. They compose through a stack but
     /// are never flattened; the destination's are dropped and rebuilt.
     pub(crate) is_index: bool,
+    /// How many columns the key holds, for decoding a stored key back into values.
+    pub(crate) n_keys: usize,
 }
 
 /// Every relation in the store, by relation id.
@@ -64,6 +66,7 @@ pub(crate) fn catalog_relations(
                 // Cozo names an index after its parent, `relation:index`; that colon is the
                 // catalog's own marker, and what `::relations` reports on.
                 is_index: meta.name.contains(':'),
+                n_keys: meta.metadata.keys.len(),
             },
         );
         it.next();

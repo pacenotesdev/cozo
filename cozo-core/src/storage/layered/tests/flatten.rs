@@ -246,3 +246,318 @@ fn flattening_into_a_dirty_head_leaves_its_work_alone() -> Result<()> {
     );
     Ok(())
 }
+
+/// A plan reports what a flatten would do, and does none of it. Running the flatten afterwards
+/// reports the same counts, so a caller can act on a plan without re-deriving anything.
+#[test]
+fn a_plan_predicts_the_flatten_and_writes_nothing() -> Result<()> {
+    let f = Fixture::new()?;
+    f.assert_rec(&base(), "shared", "v0")?;
+    let (work, view) = branch(&f, "work")?;
+
+    f.assert_rec(&work, "added", "v1")?;
+    // Identical to what the base already holds: this dedupes rather than copies.
+    f.assert_rec(&work, "shared", "v0")?;
+    // A tombstone for a record the base never saw: this is dropped.
+    f.assert_rec(&work, "ephemeral", "v2")?;
+    f.retract_rec(&work, "ephemeral")?;
+
+    let before = f.versions(&base())?;
+    let plan = f.db.flatten_plan(&view, &base())?;
+    assert!(plan.is_clean());
+    assert_eq!(plan.stats.rows_copied, 1);
+    assert_eq!(plan.stats.rows_deduped, 1);
+    assert_eq!(plan.stats.tombstones_dropped, 1);
+    assert!(plan.stats.bytes_copied > 0);
+    // A plan commits nothing, so it occupies no sequence.
+    assert_eq!(plan.stats.seq_range, None);
+    assert_eq!(f.versions(&base())?, before, "the plan wrote to the base");
+
+    let stats = f.db.flatten(&view, &base(), true)?;
+    assert_eq!(stats.rows_copied, plan.stats.rows_copied);
+    assert_eq!(stats.rows_deduped, plan.stats.rows_deduped);
+    assert_eq!(stats.tombstones_dropped, plan.stats.tombstones_dropped);
+    assert_eq!(stats.bytes_copied, plan.stats.bytes_copied);
+    assert!(stats.seq_range.is_some(), "the flatten did commit");
+    Ok(())
+}
+
+/// A plan reports every collision, not the first one, and identifies each in decoded terms.
+#[test]
+fn a_plan_reports_every_conflict() -> Result<()> {
+    let f = Fixture::new()?;
+    let (work, view) = branch(&f, "work")?;
+
+    for (id, base_val, branch_val) in [
+        ("a", "base-a", "branch-a"),
+        ("b", "base-b", "branch-b"),
+        ("c", "base-c", "branch-c"),
+    ] {
+        // The branch's bound predates these, so it cannot see them and the write is legal
+        // on both sides. The divergence only becomes visible when the two lineages meet.
+        f.assert_rec(&base(), id, base_val)?;
+        f.assert_rec(&work, id, branch_val)?;
+    }
+
+    let plan = f.db.flatten_plan(&view, &base())?;
+    assert!(!plan.is_clean());
+    assert_eq!(plan.conflicts.len(), 3, "{:?}", plan.conflicts);
+
+    let mut seen: Vec<(String, String, String)> = plan
+        .conflicts
+        .iter()
+        .map(|c| {
+            assert_eq!(c.relation, "rec");
+            // The key decodes to its columns, the identity first and the validity last.
+            let id = super::as_str(&c.key[0]);
+            (
+                id,
+                super::as_str(&c.existing[0]),
+                super::as_str(&c.incoming[0]),
+            )
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            ("a".to_string(), "base-a".to_string(), "branch-a".to_string()),
+            ("b".to_string(), "base-b".to_string(), "branch-b".to_string()),
+            ("c".to_string(), "base-c".to_string(), "branch-c".to_string()),
+        ]
+    );
+    Ok(())
+}
+
+/// The flatten that follows a conflicted plan fails, names what collided, and writes nothing.
+#[test]
+fn a_conflicted_flatten_names_what_collided() -> Result<()> {
+    let f = Fixture::new()?;
+    let (work, view) = branch(&f, "work")?;
+    f.assert_rec(&base(), "k", "from-base")?;
+    f.assert_rec(&work, "k", "from-branch")?;
+
+    let before = f.versions(&base())?;
+    let err = f.db.flatten(&view, &base(), true).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(msg.contains("1 key(s) collide"), "unexpected error: {msg}");
+    assert!(msg.contains("rec"), "the relation is not named: {msg}");
+    assert!(msg.contains("from-base"), "the values are not named: {msg}");
+    assert!(msg.contains("from-branch"), "the values are not named: {msg}");
+    assert_eq!(f.versions(&base())?, before, "the failed flatten wrote");
+    Ok(())
+}
+
+/// A plan of a view that changes nothing is clean and empty — the same no-op the flatten is.
+#[test]
+fn an_empty_plan_is_clean() -> Result<()> {
+    let f = Fixture::new()?;
+    let (_work, view) = branch(&f, "work")?;
+    let plan = f.db.flatten_plan(&view, &base())?;
+    assert!(plan.is_clean());
+    assert_eq!(plan.stats, Default::default());
+    Ok(())
+}
+
+/// Paging covers exactly what one pass covers: every item, once, in order, with no gap at a
+/// page boundary and none at a relation boundary either.
+#[test]
+fn pages_cover_the_scan_exactly() -> Result<()> {
+    use crate::runtime::db::ScriptMutability;
+    use crate::storage::layered::flatten::FlattenCursor;
+
+    let f = Fixture::new()?;
+    f.db.run_script(
+        ":create rec2 {id: String, at: Validity => val: String}",
+        Default::default(),
+        ScriptMutability::Mutable,
+    )?;
+    f.assert_rec(&base(), "shared", "v0")?;
+    let (work, view) = branch(&f, "work")?;
+
+    for i in 0..7 {
+        f.assert_rec(&work, &format!("k{i}"), "v")?;
+    }
+    // Identical to the base's row: a dedupe, which must still be reported with its key.
+    f.assert_rec(&work, "shared", "v0")?;
+    // A second relation, so the scan has a boundary to cross mid-page.
+    for i in 0..5 {
+        f.db.run_on_stack(
+            &format!("?[id, at, val] <- [['r{i}', 'ASSERT', 'v']] :put rec2 {{id, at => val}}"),
+            Default::default(),
+            &work,
+            None,
+            ScriptMutability::Mutable,
+        )?;
+    }
+
+    let whole = f.db.flatten_page(&view, &base(), None, 1000)?;
+    assert_eq!(whole.next, None, "a page past the end should not resume");
+    assert_eq!(whole.items.len(), 13);
+
+    let mut paged = vec![];
+    let mut cursor: Option<FlattenCursor> = None;
+    let mut pages = 0;
+    loop {
+        let page = f.db.flatten_page(&view, &base(), cursor.as_ref(), 2)?;
+        pages += 1;
+        assert!(page.items.len() <= 2);
+        paged.extend(page.items);
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+        assert!(pages < 50, "paging did not terminate");
+    }
+    assert_eq!(paged, whole.items, "paging saw something a single pass did not");
+
+    // The plan counts the same scan.
+    let plan = f.db.flatten_plan(&view, &base())?;
+    assert!(plan.is_clean());
+    assert_eq!(plan.stats.rows_copied, 12);
+    assert_eq!(plan.stats.rows_deduped, 1);
+    Ok(())
+}
+
+/// A deduped row is reported with its key, not as an anonymous count.
+#[test]
+fn a_paged_dedupe_carries_its_key() -> Result<()> {
+    let f = Fixture::new()?;
+    f.assert_rec(&base(), "shared", "v0")?;
+    let (work, view) = branch(&f, "work")?;
+    f.assert_rec(&work, "shared", "v0")?;
+
+    let page = f.db.flatten_page(&view, &base(), None, 10)?;
+    assert_eq!(page.items.len(), 1);
+    match &page.items[0] {
+        crate::storage::layered::flatten::FlattenItem::Dedupe { relation, key } => {
+            assert_eq!(relation, "rec");
+            assert_eq!(super::as_str(&key[0]), "shared");
+        }
+        other => panic!("expected a dedupe, got {other:?}"),
+    }
+    Ok(())
+}
+
+/// Conflicts appear in a page like any other item, so a diff can render them inline.
+#[test]
+fn a_page_reports_conflicts_inline() -> Result<()> {
+    let f = Fixture::new()?;
+    let (work, view) = branch(&f, "work")?;
+    f.assert_rec(&base(), "k", "from-base")?;
+    f.assert_rec(&work, "k", "from-branch")?;
+
+    let page = f.db.flatten_page(&view, &base(), None, 10)?;
+    assert_eq!(page.items.len(), 1);
+    match &page.items[0] {
+        crate::storage::layered::flatten::FlattenItem::Conflict(c) => {
+            assert_eq!(c.relation, "rec");
+            assert_eq!(super::as_str(&c.existing[0]), "from-base");
+            assert_eq!(super::as_str(&c.incoming[0]), "from-branch");
+        }
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+    Ok(())
+}
+
+/// Flattening a layer into itself is refused: the scan would read the layer as it is written.
+#[test]
+fn a_layer_cannot_be_flattened_into_itself() -> Result<()> {
+    let f = Fixture::new()?;
+    let (work, view) = branch(&f, "work")?;
+    f.assert_rec(&work, "k", "v")?;
+
+    let err = f.db.flatten(&view, &work, true).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("both the source"),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+
+/// Two sibling layers in one source view, each holding a different value for one key. Neither
+/// could see the other when it wrote, so both writes were legal; stamp order is not entitled to
+/// choose between them, and the disagreement is reported rather than silently resolved.
+#[test]
+fn siblings_in_one_source_view_do_not_resolve_by_stamp() -> Result<()> {
+    use crate::storage::layered::flatten::ConflictKind;
+
+    let f = Fixture::new()?;
+    let fork = f.seq();
+    f.db.create_layer("a")?;
+    f.db.create_layer("b")?;
+    let a: Stack = vec![LayerRef::new("a"), LayerRef::bounded("default", fork)];
+    let b: Stack = vec![LayerRef::new("b"), LayerRef::bounded("default", fork)];
+
+    f.assert_rec(&a, "k", "from-a")?;
+    f.assert_rec(&b, "k", "from-b")?;
+
+    let both: Stack = vec![LayerRef::new("a"), LayerRef::new("b")];
+    let plan = f.db.flatten_plan(&both, &base())?;
+    assert!(!plan.is_clean(), "the disagreement was resolved silently");
+    assert_eq!(plan.conflicts.len(), 1);
+    assert_eq!(plan.conflicts[0].kind, ConflictKind::Source);
+    assert_eq!(plan.stats.rows_copied, 0, "neither value may be written");
+
+    let mut values = vec![
+        super::as_str(&plan.conflicts[0].existing[0]),
+        super::as_str(&plan.conflicts[0].incoming[0]),
+    ];
+    values.sort();
+    assert_eq!(values, vec!["from-a".to_string(), "from-b".to_string()]);
+
+    // And the flatten refuses rather than picking a winner.
+    let before = f.versions(&base())?;
+    let err = f.db.flatten(&both, &base(), true).unwrap_err();
+    assert!(format!("{err:?}").contains("collide"), "{err:?}");
+    assert_eq!(f.versions(&base())?, before);
+    Ok(())
+}
+
+/// Siblings that agree — the same record cherry-picked into both — are not a conflict. One
+/// copy is written and the duplicate authoring is deduped away.
+#[test]
+fn siblings_that_agree_are_not_a_conflict() -> Result<()> {
+    let f = Fixture::new()?;
+    let fork = f.seq();
+    f.db.create_layer("a")?;
+    f.db.create_layer("b")?;
+    let a: Stack = vec![LayerRef::new("a"), LayerRef::bounded("default", fork)];
+    let b: Stack = vec![LayerRef::new("b"), LayerRef::bounded("default", fork)];
+
+    f.assert_rec(&a, "k", "same")?;
+    f.assert_rec(&b, "k", "same")?;
+
+    let both: Stack = vec![LayerRef::new("a"), LayerRef::new("b")];
+    let plan = f.db.flatten_plan(&both, &base())?;
+    assert!(plan.is_clean());
+    assert_eq!(plan.stats.rows_copied, 1, "one copy, not two");
+
+    f.db.flatten(&both, &base(), true)?;
+    assert_eq!(f.live(&base(), None)?, frontier(&[("k", "same")]));
+    assert_eq!(f.versions(&base())?.len(), 1);
+    Ok(())
+}
+
+/// A record asserted, retracted and re-asserted with the same value is one lineage agreeing
+/// with itself, however long its version chain. The chain is never held in memory, and a
+/// tombstone's value is not compared against an assertion's.
+#[test]
+fn a_long_version_chain_is_not_a_disagreement() -> Result<()> {
+    let f = Fixture::new()?;
+    let (work, view) = branch(&f, "work")?;
+    for _ in 0..20 {
+        f.assert_rec(&work, "k", "v")?;
+        f.retract_rec(&work, "k")?;
+    }
+    f.assert_rec(&work, "k", "v")?;
+
+    let plan = f.db.flatten_plan(&view, &base())?;
+    assert!(plan.is_clean(), "{:?}", plan.conflicts);
+    assert_eq!(plan.stats.rows_copied, 1, "only the net effect is copied");
+    f.db.flatten(&view, &base(), true)?;
+    assert_eq!(f.live(&base(), None)?, frontier(&[("k", "v")]));
+    Ok(())
+}
+
