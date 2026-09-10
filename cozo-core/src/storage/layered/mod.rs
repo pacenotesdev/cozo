@@ -301,7 +301,7 @@ impl<'s> Storage<'s> for LayeredStorage {
         Ok(LayeredTx {
             inner,
             tx: Some(inner.db.transaction()),
-            layers,
+            stack: crate::storage::layered::tx::BoundStack::new(layers),
             catalog,
             pending: vec![],
             relations: Default::default(),

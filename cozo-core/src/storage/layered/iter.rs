@@ -5,6 +5,8 @@
 use miette::{miette, Result};
 use rocksdb::{DBRawIteratorWithThreadMode, MultiThreaded, OptimisticTransactionDB, Transaction};
 
+use std::borrow::Cow;
+
 use crate::data::memcmp::tail_validity;
 use crate::data::tuple::{check_key_for_validity, key_ends_in_validity, Tuple};
 use crate::data::value::ValidityTs;
@@ -163,11 +165,11 @@ impl<'a> LayerIter<'a> {
 /// beats maintaining a heap.
 pub(crate) struct StackMerge<'a> {
     layers: Vec<LayerIter<'a>>,
-    upper: Option<Vec<u8>>,
+    upper: Option<Cow<'a, [u8]>>,
 }
 
 impl<'a> StackMerge<'a> {
-    pub(crate) fn new(iters: Vec<(RawIter<'a>, Window)>, upper: Option<Vec<u8>>) -> Self {
+    pub(crate) fn new(iters: Vec<(RawIter<'a>, Window)>, upper: Option<Cow<'a, [u8]>>) -> Self {
         Self {
             layers: iters
                 .into_iter()
@@ -210,12 +212,14 @@ impl<'a> StackMerge<'a> {
         let front = self.front()?;
         let key = self.layers[front].key().unwrap().to_vec();
         let val = self.layers[front].value().unwrap_or_default().to_vec();
-        let upper = self.upper.clone();
         // Advance every layer sitting on this exact key, not just the front one: that is what
         // collapses a row present identically in several layers into a single emission.
-        for layer in self.layers.iter_mut() {
+        // The two fields are borrowed disjointly so the bound is not copied once per row.
+        let Self { layers, upper } = self;
+        let upper = upper.as_deref();
+        for layer in layers.iter_mut() {
             if layer.key() == Some(key.as_slice()) {
-                if let Err(err) = layer.advance(upper.as_deref()) {
+                if let Err(err) = layer.advance(upper) {
                     return Some(Err(err));
                 }
             }

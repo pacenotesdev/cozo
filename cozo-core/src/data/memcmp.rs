@@ -63,19 +63,58 @@ pub(crate) fn tail_validity(key: &[u8]) -> Option<Validity> {
     })
 }
 
-/// Split an encoded key that ends in a validity into its identity (everything but the
-/// validity) and the scan range covering every version of that identity.
+/// The identity of an encoded key: everything before the trailing validity.
 ///
-/// A validity is always the last key component of the relation that has one, so the range
-/// `[identity ++ VLD_TAG, identity ++ VLD_TAG+1)` is exactly that key's version chain.
-pub(crate) fn validity_version_range(key: &[u8]) -> (&[u8], Vec<u8>, Vec<u8>) {
+/// A borrow, not a copy. Callers that only need to tell one key's versions apart should use
+/// this rather than [`KeyBounds`], which needs a buffer to fill.
+pub(crate) fn validity_identity(key: &[u8]) -> &[u8] {
     debug_assert!(key.len() >= VLD_ENCODED_LEN);
-    let identity = &key[..key.len() - VLD_ENCODED_LEN];
-    let mut lower = identity.to_vec();
-    lower.push(VLD_TAG);
-    let mut upper = identity.to_vec();
+    &key[..key.len() - VLD_ENCODED_LEN]
+}
+
+/// Reusable buffers for the scan range covering every version of one key's identity.
+///
+/// A validity is always the last key component of the relation that has one, so
+/// `[identity ++ VLD_TAG, identity ++ VLD_TAG+1)` is exactly that key's version chain.
+/// Refilling reuses the buffers, so a caller that walks many keys allocates only while the
+/// buffers grow to the longest key it sees.
+#[derive(Default)]
+pub(crate) struct KeyBounds {
+    lower: Vec<u8>,
+    upper: Vec<u8>,
+}
+
+impl KeyBounds {
+    /// Point the buffers at `key`'s identity, reusing whatever capacity they already hold.
+    pub(crate) fn fill(&mut self, key: &[u8]) {
+        let identity = validity_identity(key);
+        self.lower.clear();
+        self.lower.extend_from_slice(identity);
+        self.lower.push(VLD_TAG);
+        self.upper.clear();
+        self.upper.extend_from_slice(identity);
+        self.upper.push(VLD_TAG + 1);
+    }
+
+    pub(crate) fn lower(&self) -> &[u8] {
+        &self.lower
+    }
+
+    pub(crate) fn upper(&self) -> &[u8] {
+        &self.upper
+    }
+}
+
+/// The exclusive end of the range covering every version of `key`'s identity.
+///
+/// For a caller that needs the bound once rather than per key; [`KeyBounds`] is what a loop
+/// should use.
+pub(crate) fn validity_range_end(key: &[u8]) -> Vec<u8> {
+    let identity = validity_identity(key);
+    let mut upper = Vec::with_capacity(identity.len() + 1);
+    upper.extend_from_slice(identity);
     upper.push(VLD_TAG + 1);
-    (identity, lower, upper)
+    upper
 }
 
 /// The nine bytes an encoded validity with timestamp `ts` begins with: the tag and the

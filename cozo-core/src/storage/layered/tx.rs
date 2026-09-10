@@ -3,16 +3,17 @@
  */
 
 use std::cell::OnceCell;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use miette::{bail, miette, IntoDiagnostic, Result, WrapErr};
 use rocksdb::BoundColumnFamily;
 
+use std::borrow::Cow;
+
 use crate::data::memcmp::{
-    contains_validity_ts, restamp_all_validity, tail_validity, validity_version_range,
+    contains_validity_ts, restamp_all_validity, tail_validity, KeyBounds,
 };
-use crate::storage::layered::catalog::{catalog_relations, relation_of, RelInfo};
+use crate::storage::layered::catalog::{catalog_relations, relation_of, Catalog};
 use crate::data::tuple::Tuple;
 use crate::data::value::ValidityTs;
 use crate::storage::layered::iter::{
@@ -20,6 +21,61 @@ use crate::storage::layered::iter::{
 };
 use crate::storage::layered::{LayeredInner, StackSpec, Seq, PENDING_SEQ};
 use crate::storage::StoreTx;
+
+/// A resolved stack, together with the scratch space its per-key lookups reuse.
+///
+/// The buffers are an implementation detail of [`BoundStack::key_state`]: they are filled and
+/// consumed inside a single call, so nothing outside this type sees them.
+pub(crate) struct BoundStack<'a> {
+    pub(crate) layers: Vec<BoundLayer<'a>>,
+    bounds: KeyBounds,
+}
+
+impl<'a> BoundStack<'a> {
+    pub(crate) fn new(layers: Vec<BoundLayer<'a>>) -> Self {
+        Self {
+            layers,
+            bounds: KeyBounds::default(),
+        }
+    }
+
+    /// What this stack says about one key's identity right now.
+    ///
+    /// Reads the identity's versions newest first and stops at the first assertion, which is
+    /// all either answer needs: the newest version decides liveness, and under value
+    /// immutability every assertion under a key carries the same value. Nothing beyond that
+    /// point is read, so a key with a long history costs no more than one with two versions.
+    pub(crate) fn key_state(&mut self, txn: &LayeredTxn<'_>, key: &[u8]) -> Result<KeyState> {
+        self.bounds.fill(key);
+        let iters = self
+            .layers
+            .iter()
+            .map(|l| (txn.raw_iterator_cf(&l.cf), l.window))
+            .collect();
+        let mut merge = StackMerge::new(iters, Some(Cow::Borrowed(self.bounds.upper())));
+        merge.seek(self.bounds.lower())?;
+
+        let mut state = KeyState {
+            live: false,
+            asserted: None,
+        };
+        let mut idx = 0usize;
+        while let Some(row) = merge.next_kv() {
+            let (k, v) = row?;
+            let at = idx;
+            idx += 1;
+            let Some(vld) = tail_validity(&k) else { continue };
+            if at == 0 {
+                state.live = vld.is_assert.0;
+            }
+            if vld.is_assert.0 {
+                state.asserted = Some(v);
+                break;
+            }
+        }
+        Ok(state)
+    }
+}
 
 /// A layer, resolved against the open database for the life of one transaction.
 pub(crate) struct BoundLayer<'a> {
@@ -36,12 +92,12 @@ pub(crate) struct BoundLayer<'a> {
 pub struct LayeredTx<'a> {
     pub(crate) inner: &'a LayeredInner,
     pub(crate) tx: Option<LayeredTxn<'a>>,
-    pub(crate) layers: Vec<BoundLayer<'a>>,
+    pub(crate) stack: BoundStack<'a>,
     pub(crate) catalog: Arc<BoundColumnFamily<'a>>,
     /// Keys written with the pending stamp, awaiting a sequence number at commit.
     pub(crate) pending: Vec<Vec<u8>>,
     /// The catalog, read lazily: only a multi-layer stack needs it, and then only once.
-    pub(crate) relations: OnceCell<BTreeMap<u64, RelInfo>>,
+    pub(crate) relations: OnceCell<Catalog>,
 }
 
 // Same caveat as the other RocksDB backends: the underlying transaction is not `Sync`, and the
@@ -62,7 +118,7 @@ impl<'a> LayeredTx<'a> {
     }
 
     fn top(&self) -> &BoundLayer<'a> {
-        &self.layers[0]
+        &self.stack.layers[0]
     }
 
     /// Where a write goes: the catalog is global, everything else goes to the top layer.
@@ -79,7 +135,7 @@ impl<'a> LayeredTx<'a> {
         if is_catalog_key(lower) {
             vec![(self.catalog.clone(), Window::OPEN)]
         } else {
-            self.layers
+            self.stack.layers
                 .iter()
                 .map(|l| (l.cf.clone(), l.window))
                 .collect()
@@ -93,7 +149,7 @@ impl<'a> LayeredTx<'a> {
             .into_iter()
             .map(|(cf, win)| (txn.raw_iterator_cf(&cf), win))
             .collect();
-        Ok(StackMerge::new(iters, upper))
+        Ok(StackMerge::new(iters, upper.map(std::borrow::Cow::Owned)))
     }
 
     fn raw_iter(&'a self, lower: &[u8], upper: Option<Vec<u8>>) -> Result<StackRawIter<'a>> {
@@ -106,7 +162,7 @@ impl<'a> LayeredTx<'a> {
 
     /// What the catalog says about every relation, read once per transaction and only when a
     /// multi-layer stack actually needs it.
-    fn relations(&self) -> Result<&BTreeMap<u64, RelInfo>> {
+    fn relations(&self) -> Result<&Catalog> {
         if let Some(known) = self.relations.get() {
             return Ok(known);
         }
@@ -121,7 +177,7 @@ impl<'a> LayeredTx<'a> {
     /// to sit in, and not on whether the operation would have found anything. It fails before
     /// any row is read, which is the whole point of checking it here rather than at delete time.
     fn gate(&self, key: &[u8], destructive: bool) -> Result<()> {
-        if self.layers.len() < 2 {
+        if self.stack.layers.len() < 2 {
             return Ok(());
         }
         if is_catalog_key(key) {
@@ -138,7 +194,7 @@ impl<'a> LayeredTx<'a> {
         let Some(rel_id) = relation_of(key) else {
             return Ok(());
         };
-        let Some(info) = self.relations()?.get(&rel_id) else {
+        let Some(info) = self.relations()?.get(rel_id) else {
             // A relation the catalog has not caught up with: a definition written earlier in
             // this same transaction. It cannot be older than this stack, so let it through.
             return Ok(());
@@ -171,7 +227,7 @@ impl<'a> LayeredTx<'a> {
 
     /// The layer stack, as spelled for error messages.
     pub(crate) fn stack_description(&self) -> String {
-        self.layers
+        self.stack.layers
             .iter()
             .map(|l| match (l.window.since, l.window.bound) {
                 (None, None) => l.name.clone(),
@@ -194,64 +250,6 @@ pub(crate) struct KeyState {
     pub(crate) asserted: Option<Vec<u8>>,
 }
 
-/// Every visible version of one key's identity, newest first.
-///
-/// The version chain of a key is short by construction (a record is created, perhaps
-/// retracted, perhaps re-introduced), so this collects rather than streaming.
-pub(crate) fn version_chain(
-    txn: &LayeredTxn<'_>,
-    layers: &[BoundLayer<'_>],
-    key: &[u8],
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let (_, lower, upper) = validity_version_range(key);
-    let mut merged: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-    for layer in layers {
-        let mut it = txn.raw_iterator_cf(&layer.cf);
-        it.seek(&lower);
-        while let Some(k) = it.key() {
-            if k >= upper.as_slice() {
-                break;
-            }
-            if layer.window.admits(k) {
-                // Layers are visited top first, so the first value wins and the lower
-                // layers' versions of the same key are shadowed.
-                merged
-                    .entry(k.to_vec())
-                    .or_insert_with(|| it.value().unwrap_or_default().to_vec());
-            }
-            it.next();
-        }
-        it.status()
-            .into_diagnostic()
-            .wrap_err_with(|| format!("failed to read layer {}", layer.name))?;
-    }
-    // Validity sorts descending, so key order is newest first.
-    Ok(merged.into_iter().collect())
-}
-
-pub(crate) fn key_state(
-    txn: &LayeredTxn<'_>,
-    layers: &[BoundLayer<'_>],
-    key: &[u8],
-) -> Result<KeyState> {
-    let chain = version_chain(txn, layers, key)?;
-    let mut state = KeyState {
-        live: false,
-        asserted: None,
-    };
-    for (idx, (k, v)) in chain.into_iter().enumerate() {
-        let Some(vld) = tail_validity(&k) else { continue };
-        if idx == 0 {
-            state.live = vld.is_assert.0;
-        }
-        if vld.is_assert.0 {
-            state.asserted = Some(v);
-            break;
-        }
-    }
-    Ok(state)
-}
-
 impl<'s> StoreTx<'s> for LayeredTx<'s> {
     fn get(&self, key: &[u8], _for_update: bool) -> Result<Option<Vec<u8>>> {
         self.gate(key, false)?;
@@ -262,7 +260,7 @@ impl<'s> StoreTx<'s> for LayeredTx<'s> {
                 .into_diagnostic()
                 .wrap_err("failed to read catalog");
         }
-        for layer in self.layers.iter() {
+        for layer in self.stack.layers.iter() {
             // A key invisible through this layer's window contributes nothing here, but a
             // lower layer with a different window may still hold it.
             if !layer.window.admits(key) {
@@ -305,7 +303,13 @@ impl<'s> StoreTx<'s> for LayeredTx<'s> {
         // one (over a live row or a tombstoned one) is backdoor mutability, and merge
         // soundness rests on it never happening.
         if stamped && vld.map_or(false, |v| v.is_assert.0) {
-            let state = key_state(self.txn()?, &self.layers, key)?;
+            // Borrow the transaction and the stack disjointly: the lookup needs the stack
+            // mutably, and the transaction is a sibling field.
+            let Self { tx, stack, .. } = self;
+            let txn = tx
+                .as_ref()
+                .ok_or_else(|| miette!("transaction already committed"))?;
+            let state = stack.key_state(txn, key)?;
             if let Some(previous) = state.asserted {
                 if previous != val {
                     bail!(

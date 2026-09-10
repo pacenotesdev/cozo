@@ -7,16 +7,17 @@
 
 use miette::{bail, miette, IntoDiagnostic, Result, WrapErr};
 
-use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
-use crate::data::memcmp::{restamp_tail_validity, tail_validity, validity_version_range};
+use crate::data::memcmp::{
+    restamp_tail_validity, tail_validity, validity_identity, validity_range_end,
+};
 use crate::data::tuple::decode_tuple_from_key;
 use crate::data::value::DataValue;
 use crate::runtime::relation::extend_tuple_from_v;
 use crate::storage::layered::iter::{LayeredTxn, StackMerge};
-use crate::storage::layered::catalog::{catalog_relations, RelInfo};
-use crate::storage::layered::tx::{bind_layers, key_state, BoundLayer};
+use crate::storage::layered::catalog::{catalog_relations, Catalog, RelInfo};
+use crate::storage::layered::tx::{bind_layers, BoundLayer, BoundStack};
 use crate::storage::layered::{LayeredStorage, Seq, Stack, DEFAULT_LAYER};
 use crate::Db;
 
@@ -201,7 +202,7 @@ struct Resolved {
 /// Decide one resolved identity against the destination and hand it to the visitor.
 fn emit<F>(
     txn: &LayeredTxn<'_>,
-    dst_layers: &[BoundLayer<'_>],
+    dst: &mut BoundStack<'_>,
     rel: &RelInfo,
     done: Resolved,
     visit: &mut F,
@@ -209,7 +210,7 @@ fn emit<F>(
 where
     F: FnMut(&RelInfo, RowEffect<'_>) -> Result<ControlFlow<()>>,
 {
-    let state = key_state(txn, dst_layers, &done.key)?;
+    let state = dst.key_state(txn, &done.key)?;
     let effect = if let (Some(other), Some(newest)) = (&done.divergent, &done.asserted) {
         // Two source layers disagree. Reported before the destination is consulted: the view
         // is not self-consistent, so what the destination holds cannot settle it.
@@ -273,15 +274,15 @@ where
 fn scan<F>(
     txn: &LayeredTxn<'_>,
     src_layers: &[BoundLayer<'_>],
-    dst_layers: &[BoundLayer<'_>],
-    relations: &BTreeMap<u64, RelInfo>,
+    dst: &mut BoundStack<'_>,
+    relations: &Catalog,
     after: Option<&[u8]>,
     mut visit: F,
 ) -> Result<Option<Vec<u8>>>
 where
     F: FnMut(&RelInfo, RowEffect<'_>) -> Result<ControlFlow<()>>,
 {
-    for rel in relations.values() {
+    for rel in relations.iter() {
         if rel.is_index {
             // Copying index rows would splice two independently evolved graphs into something
             // structurally invalid, whose only symptom is silent recall loss. The destination's
@@ -314,7 +315,7 @@ where
         // versions of one identity sort *after* the newest, so seeking to the key itself would
         // re-resolve the identity to a stale version.
         let start = match after {
-            Some(after) if after > lower.as_slice() => validity_version_range(after).2,
+            Some(after) if after > lower.as_slice() => validity_range_end(after),
             _ => lower.clone(),
         };
 
@@ -322,7 +323,7 @@ where
             .iter()
             .map(|l| (txn.raw_iterator_cf(&l.cf), l.window))
             .collect();
-        let mut merge = StackMerge::new(iters, Some(upper.clone()));
+        let mut merge = StackMerge::new(iters, Some(std::borrow::Cow::Owned(upper.clone())));
         merge.seek(&start)?;
 
         // One identity at a time, and only O(1) of it: the newest version, the newest
@@ -339,7 +340,7 @@ where
                 );
             };
             let asserts = vld.is_assert.0;
-            let (identity, _, _) = validity_version_range(&key);
+            let identity = validity_identity(&key);
 
             match cur.as_mut() {
                 // An older version of the identity being resolved. It does not change what the
@@ -360,7 +361,7 @@ where
                 _ => {
                     if let Some(done) = cur.take() {
                         if let ControlFlow::Break(at) =
-                            emit(txn, dst_layers, rel, done, &mut visit)?
+                            emit(txn, dst, rel, done, &mut visit)?
                         {
                             return Ok(Some(at));
                         }
@@ -377,7 +378,7 @@ where
             }
         }
         if let Some(done) = cur.take() {
-            if let ControlFlow::Break(at) = emit(txn, dst_layers, rel, done, &mut visit)? {
+            if let ControlFlow::Break(at) = emit(txn, dst, rel, done, &mut visit)? {
                 return Ok(Some(at));
             }
         }
@@ -395,7 +396,7 @@ fn conflict_at(
 ) -> FlattenConflict {
     FlattenConflict {
         kind,
-        relation: rel.name.clone(),
+        relation: rel.name.to_string(),
         key: decode_tuple_from_key(key, rel.n_keys),
         existing: decode_values(existing),
         incoming: decode_values(incoming),
@@ -416,8 +417,8 @@ fn decode_values(val: &[u8]) -> Vec<DataValue> {
 struct ScanContext<'a> {
     txn: LayeredTxn<'a>,
     src_layers: Vec<BoundLayer<'a>>,
-    dst_layers: Vec<BoundLayer<'a>>,
-    relations: BTreeMap<u64, RelInfo>,
+    dst: BoundStack<'a>,
+    relations: Catalog,
 }
 
 impl Db<LayeredStorage> {
@@ -427,7 +428,7 @@ impl Db<LayeredStorage> {
         let inner = &*self.db.inner;
         let txn = inner.db.transaction();
         let src_layers = bind_layers(inner, &src_spec)?;
-        let dst_layers = bind_layers(inner, &dst_spec)?;
+        let dst = BoundStack::new(bind_layers(inner, &dst_spec)?);
         let catalog = inner
             .db
             .cf_handle(DEFAULT_LAYER)
@@ -436,7 +437,7 @@ impl Db<LayeredStorage> {
         Ok(ScanContext {
             txn,
             src_layers,
-            dst_layers,
+            dst,
             relations,
         })
     }
@@ -452,12 +453,12 @@ impl Db<LayeredStorage> {
     ///
     /// A clean plan is not a promise: see [`FlattenPlan`] on staleness.
     pub fn flatten_plan(&self, src: &Stack, dst: &Stack) -> Result<FlattenPlan> {
-        let ctx = self.scan_context(src, dst)?;
+        let mut ctx = self.scan_context(src, dst)?;
         let mut plan = FlattenPlan::default();
         scan(
             &ctx.txn,
             &ctx.src_layers,
-            &ctx.dst_layers,
+            &mut ctx.dst,
             &ctx.relations,
             None,
             |rel, effect| {
@@ -499,19 +500,19 @@ impl Db<LayeredStorage> {
         after: Option<&FlattenCursor>,
         limit: usize,
     ) -> Result<FlattenPage> {
-        let ctx = self.scan_context(src, dst)?;
+        let mut ctx = self.scan_context(src, dst)?;
         let mut items = Vec::with_capacity(limit.min(1024));
         let next = scan(
             &ctx.txn,
             &ctx.src_layers,
-            &ctx.dst_layers,
+            &mut ctx.dst,
             &ctx.relations,
             after.map(|c| c.0.as_slice()),
             |rel, effect| {
                 if limit == 0 {
                     return Ok(ControlFlow::Break(()));
                 }
-                let relation = rel.name.clone();
+                let relation = rel.name.to_string();
                 items.push(match effect {
                     RowEffect::Effective { key, val, .. } => FlattenItem::Copy {
                         relation,
@@ -568,9 +569,9 @@ impl Db<LayeredStorage> {
     /// that free. The commit lock is held for the whole call, not merely the writes, because
     /// the stamp is allocated before the first row is decided.
     pub fn flatten(&self, src: &Stack, dst: &Stack, restamp: bool) -> Result<FlattenStats> {
-        let ctx = self.scan_context(src, dst)?;
-        let top = ctx.dst_layers[0].cf.clone();
-        if let Some(clash) = ctx.src_layers.iter().find(|l| l.name == ctx.dst_layers[0].name) {
+        let mut ctx = self.scan_context(src, dst)?;
+        let top = ctx.dst.layers[0].cf.clone();
+        if let Some(clash) = ctx.src_layers.iter().find(|l| l.name == ctx.dst.layers[0].name) {
             bail!(
                 "cannot flatten: layer '{}' is both the source of this flatten and the \
                  destination's top layer",
@@ -594,7 +595,7 @@ impl Db<LayeredStorage> {
         scan(
             &ctx.txn,
             &ctx.src_layers,
-            &ctx.dst_layers,
+            &mut ctx.dst,
             &ctx.relations,
             None,
             |rel, effect| {
