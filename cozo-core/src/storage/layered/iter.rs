@@ -44,6 +44,11 @@ impl Window {
     /// a bounded base layer must keep contributing its edges, or traversal from a branch sees
     /// only the branch's own nodes and silently loses the rest.
     pub(crate) fn admits(&self, key: &[u8]) -> bool {
+        if self.since.is_none() && self.bound.is_none() {
+            // An open window excludes nothing, so the row's sequence never has to be read.
+            // Every layer of a single-layer stack is open, so this is the common path.
+            return true;
+        }
         let vld = tail_validity(key);
         debug_assert_eq!(
             vld.is_some(),
@@ -166,6 +171,11 @@ impl<'a> LayerIter<'a> {
 pub(crate) struct StackMerge<'a> {
     layers: Vec<LayerIter<'a>>,
     upper: Option<Cow<'a, [u8]>>,
+    /// The key the merge is currently sitting on, so that every layer holding it can be
+    /// advanced once the row has been handed out. Reused between rows.
+    front_key: Vec<u8>,
+    /// Whether a row has been handed out and not yet advanced past.
+    positioned: bool,
 }
 
 impl<'a> StackMerge<'a> {
@@ -176,10 +186,14 @@ impl<'a> StackMerge<'a> {
                 .map(|(it, win)| LayerIter::new(it, win))
                 .collect(),
             upper,
+            front_key: vec![],
+            positioned: false,
         }
     }
 
     pub(crate) fn seek(&mut self, from: &[u8]) -> Result<()> {
+        // Seeking repositions every layer, so there is nothing left to advance past.
+        self.positioned = false;
         let upper = self.upper.as_deref();
         for layer in self.layers.iter_mut() {
             layer.seek(from, upper)?;
@@ -208,23 +222,51 @@ impl<'a> StackMerge<'a> {
         best
     }
 
-    pub(crate) fn next_kv(&mut self) -> Option<Result<(Vec<u8>, Vec<u8>)>> {
-        let front = self.front()?;
-        let key = self.layers[front].key().unwrap().to_vec();
-        let val = self.layers[front].value().unwrap_or_default().to_vec();
-        // Advance every layer sitting on this exact key, not just the front one: that is what
-        // collapses a row present identically in several layers into a single emission.
-        // The two fields are borrowed disjointly so the bound is not copied once per row.
-        let Self { layers, upper } = self;
-        let upper = upper.as_deref();
-        for layer in layers.iter_mut() {
-            if layer.key() == Some(key.as_slice()) {
-                if let Err(err) = layer.advance(upper) {
-                    return Some(Err(err));
-                }
+    /// The next row, borrowed from the layer holding it.
+    ///
+    /// The borrow lasts until the next call, which is what the `&mut self` receiver enforces:
+    /// advancing invalidates the underlying iterator's buffer, so nothing may outlive it. A
+    /// caller that needs to keep a row copies it, and one that only inspects it does not.
+    ///
+    /// Advancing happens at the start of the following call rather than before returning,
+    /// which is what lets this stay a single call per row.
+    pub(crate) fn next_borrowed(&mut self) -> Option<Result<(&[u8], &[u8])>> {
+        if self.positioned {
+            if let Err(err) = self.advance_front() {
+                return Some(Err(err));
             }
         }
-        Some(Ok((key, val)))
+        let front = self.front()?;
+        // Record the key before handing out borrows: the advance needs it to recognise every
+        // layer sitting on this row, and by then the row itself is gone.
+        self.front_key.clear();
+        self.front_key
+            .extend_from_slice(self.layers[front].key().unwrap());
+        self.positioned = true;
+        let layer = &self.layers[front];
+        Some(Ok((
+            layer.key().unwrap(),
+            layer.value().unwrap_or_default(),
+        )))
+    }
+
+    /// Advance every layer sitting on the row just handed out, not only the one it came from:
+    /// that is what collapses a row present identically in several layers into one emission.
+    fn advance_front(&mut self) -> Result<()> {
+        self.positioned = false;
+        let Self {
+            layers,
+            upper,
+            front_key,
+            ..
+        } = self;
+        let upper = upper.as_deref();
+        for layer in layers.iter_mut() {
+            if layer.key() == Some(front_key.as_slice()) {
+                layer.advance(upper)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -233,6 +275,19 @@ pub(crate) struct StackRawIter<'a> {
     pub(crate) merge: StackMerge<'a>,
     pub(crate) started: bool,
     pub(crate) lower: Vec<u8>,
+}
+
+impl<'a> StackRawIter<'a> {
+    /// The next row, borrowed. Performs the initial seek on first use.
+    pub(crate) fn next_borrowed(&mut self) -> Option<Result<(&[u8], &[u8])>> {
+        if !self.started {
+            self.started = true;
+            if let Err(err) = self.merge.seek(&self.lower) {
+                return Some(Err(err));
+            }
+        }
+        self.merge.next_borrowed()
+    }
 }
 
 impl<'a> Iterator for StackRawIter<'a> {
@@ -245,7 +300,12 @@ impl<'a> Iterator for StackRawIter<'a> {
                 return Some(Err(err));
             }
         }
-        self.merge.next_kv()
+        match self.next_borrowed()? {
+            // The one place a copy is unavoidable: `Iterator::Item` cannot borrow from the
+            // iterator, and `StoreTx::range_scan` is declared to yield owned pairs.
+            Ok((key, val)) => Some(Ok((key.to_vec(), val.to_vec()))),
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
@@ -258,8 +318,9 @@ impl<'a> Iterator for StackTupleIter<'a> {
     type Item = Result<Tuple>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.inner.next() {
-            Some(Ok((k, v))) => Some(Ok(decode_tuple_from_kv(&k, &v, None))),
+        // Decoding reads through the borrows, so the row is never copied.
+        match self.inner.next_borrowed() {
+            Some(Ok((k, v))) => Some(Ok(decode_tuple_from_kv(k, v, None))),
             Some(Err(err)) => Some(Err(err)),
             None => None,
         }
@@ -286,14 +347,19 @@ impl<'a> Iterator for StackSkipIter<'a> {
             if let Err(err) = self.merge.seek(&self.next_bound) {
                 return Some(Err(err));
             }
-            match self.merge.next_kv() {
+            match self.merge.next_borrowed() {
                 None => return None,
                 Some(Err(err)) => return Some(Err(err)),
                 Some(Ok((k, v))) => {
-                    let (ret, nxt_bound) = check_key_for_validity(&k, self.valid_at, None);
+                    // Everything needing the borrows happens first; a skipped row, which is
+                    // the common case here, is never copied.
+                    let (ret, nxt_bound) = check_key_for_validity(k, self.valid_at, None);
+                    let tup = ret.map(|mut tup| {
+                        extend_tuple_from_v(&mut tup, v);
+                        tup
+                    });
                     self.next_bound = nxt_bound;
-                    if let Some(mut tup) = ret {
-                        extend_tuple_from_v(&mut tup, &v);
+                    if let Some(tup) = tup {
                         return Some(Ok(tup));
                     }
                 }

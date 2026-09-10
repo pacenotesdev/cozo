@@ -55,8 +55,10 @@ pub(crate) fn tail_validity(key: &[u8]) -> Option<Validity> {
     if tail[0] != VLD_TAG {
         return None;
     }
-    let ts_flipped = BigEndian::read_u64(&tail[1..9]);
-    let ts = order_decode_i64(!ts_flipped);
+    // The stored form is the order-encoded timestamp with every bit complemented, which is
+    // what sorts it descending. Neither step is a byte-order change; that is the read itself.
+    let complemented = BigEndian::read_u64(&tail[1..9]);
+    let ts = order_decode_i64(!complemented);
     Some(Validity {
         timestamp: ValidityTs(Reverse(ts)),
         is_assert: Reverse(tail[9] == 0),
@@ -72,49 +74,44 @@ pub(crate) fn validity_identity(key: &[u8]) -> &[u8] {
     &key[..key.len() - VLD_ENCODED_LEN]
 }
 
-/// Reusable buffers for the scan range covering every version of one key's identity.
+/// A reusable buffer holding the scan range that covers every version of one key's identity.
 ///
 /// A validity is always the last key component of the relation that has one, so
 /// `[identity ++ VLD_TAG, identity ++ VLD_TAG+1)` is exactly that key's version chain.
-/// Refilling reuses the buffers, so a caller that walks many keys allocates only while the
-/// buffers grow to the longest key it sees.
+///
+/// The two bounds are packed end to end in one allocation rather than held in a vector each:
+/// they are always the same length, so the whole range is sized and reserved once per fill.
+/// Refilling reuses the buffer, so a caller walking many keys allocates only while it grows to
+/// the longest identity it has seen.
 #[derive(Default)]
 pub(crate) struct KeyBounds {
-    lower: Vec<u8>,
-    upper: Vec<u8>,
+    /// `[lower][upper]`, each `identity + 1` bytes long.
+    buf: Vec<u8>,
+    /// Where the lower bound ends and the upper begins.
+    split: usize,
 }
 
 impl KeyBounds {
-    /// Point the buffers at `key`'s identity, reusing whatever capacity they already hold.
+    /// Point the buffer at `key`'s identity, reusing whatever capacity it already holds.
     pub(crate) fn fill(&mut self, key: &[u8]) {
         let identity = validity_identity(key);
-        self.lower.clear();
-        self.lower.extend_from_slice(identity);
-        self.lower.push(VLD_TAG);
-        self.upper.clear();
-        self.upper.extend_from_slice(identity);
-        self.upper.push(VLD_TAG + 1);
+        self.split = identity.len() + 1;
+        self.buf.clear();
+        // Both bounds up front, so neither half can trigger a growth part way through.
+        self.buf.reserve(self.split * 2);
+        self.buf.extend_from_slice(identity);
+        self.buf.push(VLD_TAG);
+        self.buf.extend_from_slice(identity);
+        self.buf.push(VLD_TAG + 1);
     }
 
     pub(crate) fn lower(&self) -> &[u8] {
-        &self.lower
+        &self.buf[..self.split]
     }
 
     pub(crate) fn upper(&self) -> &[u8] {
-        &self.upper
+        &self.buf[self.split..]
     }
-}
-
-/// The exclusive end of the range covering every version of `key`'s identity.
-///
-/// For a caller that needs the bound once rather than per key; [`KeyBounds`] is what a loop
-/// should use.
-pub(crate) fn validity_range_end(key: &[u8]) -> Vec<u8> {
-    let identity = validity_identity(key);
-    let mut upper = Vec::with_capacity(identity.len() + 1);
-    upper.extend_from_slice(identity);
-    upper.push(VLD_TAG + 1);
-    upper
 }
 
 /// The nine bytes an encoded validity with timestamp `ts` begins with: the tag and the

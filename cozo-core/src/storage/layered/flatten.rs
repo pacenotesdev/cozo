@@ -7,11 +7,10 @@
 
 use miette::{bail, miette, IntoDiagnostic, Result, WrapErr};
 
+use std::borrow::Cow;
 use std::ops::ControlFlow;
 
-use crate::data::memcmp::{
-    restamp_tail_validity, tail_validity, validity_identity, validity_range_end,
-};
+use crate::data::memcmp::{restamp_tail_validity, tail_validity, validity_identity};
 use crate::data::tuple::decode_tuple_from_key;
 use crate::data::value::DataValue;
 use crate::runtime::relation::extend_tuple_from_v;
@@ -289,8 +288,9 @@ where
             // indexes are dropped and rebuilt instead.
             continue;
         }
-        let lower = rel.id.raw_encode().to_vec();
-        let upper = rel.id.next().raw_encode().to_vec();
+        // `raw_encode` yields an array, so these bounds live on the stack.
+        let lower = rel.id.raw_encode();
+        let upper = rel.id.next().raw_encode();
         if let Some(after) = after {
             if after >= upper.as_slice() {
                 // A relation an earlier page already finished.
@@ -314,25 +314,23 @@ where
         // Resume past every version of the last key reported, not merely past that key: older
         // versions of one identity sort *after* the newest, so seeking to the key itself would
         // re-resolve the identity to a stale version.
-        let start = match after {
-            Some(after) if after > lower.as_slice() => validity_range_end(after),
-            _ => lower.clone(),
-        };
-
         let iters = src_layers
             .iter()
             .map(|l| (txn.raw_iterator_cf(&l.cf), l.window))
             .collect();
-        let mut merge = StackMerge::new(iters, Some(std::borrow::Cow::Owned(upper.clone())));
-        merge.seek(&start)?;
+        let mut merge = StackMerge::new(iters, Some(Cow::Borrowed(&upper[..])));
+        match after {
+            Some(after) if after > lower.as_slice() => merge.seek(dst.range_end(after))?,
+            _ => merge.seek(&lower[..])?,
+        }
 
         // One identity at a time, and only O(1) of it: the newest version, the newest
         // assertive value, and one assertion that disagrees with it. Never the chain: a
         // record asserted and retracted many times has a long one.
         let mut cur: Option<Resolved> = None;
-        while let Some(row) = merge.next_kv() {
+        while let Some(row) = merge.next_borrowed() {
             let (key, val) = row?;
-            let Some(vld) = tail_validity(&key) else {
+            let Some(vld) = tail_validity(key) else {
                 bail!(
                     "relation '{}' has no validity but holds rows in a view being flattened; \
                      a relation without one cannot express a cross-layer retraction",
@@ -340,7 +338,7 @@ where
                 );
             };
             let asserts = vld.is_assert.0;
-            let identity = validity_identity(&key);
+            let identity = validity_identity(key);
 
             match cur.as_mut() {
                 // An older version of the identity being resolved. It does not change what the
@@ -350,9 +348,9 @@ where
                 Some(c) if c.identity == identity => {
                     if asserts {
                         match &c.asserted {
-                            None => c.asserted = Some(val),
-                            Some(newest) if *newest != val && c.divergent.is_none() => {
-                                c.divergent = Some(val)
+                            None => c.asserted = Some(val.to_vec()),
+                            Some(newest) if newest != val && c.divergent.is_none() => {
+                                c.divergent = Some(val.to_vec())
                             }
                             Some(_) => {}
                         }
@@ -368,9 +366,9 @@ where
                     }
                     cur = Some(Resolved {
                         identity: identity.to_vec(),
-                        asserted: if asserts { Some(val.clone()) } else { None },
-                        key,
-                        val,
+                        asserted: if asserts { Some(val.to_vec()) } else { None },
+                        key: key.to_vec(),
+                        val: val.to_vec(),
                         asserts,
                         divergent: None,
                     });
@@ -672,8 +670,8 @@ fn describe_conflicts(conflicts: &[FlattenConflict]) -> String {
 
 /// Whether one layer holds any row of a relation, window included.
 fn holds_rows(txn: &LayeredTxn<'_>, layer: &BoundLayer<'_>, rel: &RelInfo) -> Result<bool> {
-    let lower = rel.id.raw_encode().to_vec();
-    let upper = rel.id.next().raw_encode().to_vec();
+    let lower = rel.id.raw_encode();
+    let upper = rel.id.next().raw_encode();
     let mut it = txn.raw_iterator_cf(&layer.cf);
     it.seek(&lower);
     while let Some(k) = it.key() {

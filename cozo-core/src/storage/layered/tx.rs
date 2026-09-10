@@ -39,6 +39,16 @@ impl<'a> BoundStack<'a> {
         }
     }
 
+    /// The exclusive end of the range covering every version of `key`'s identity, held in
+    /// this stack's own buffer.
+    ///
+    /// The value is only valid until the next call that fills the buffer, which is why it is
+    /// returned as a borrow rather than handed out.
+    pub(crate) fn range_end(&mut self, key: &[u8]) -> &[u8] {
+        self.bounds.fill(key);
+        self.bounds.upper()
+    }
+
     /// What this stack says about one key's identity right now.
     ///
     /// Reads the identity's versions newest first and stops at the first assertion, which is
@@ -60,16 +70,17 @@ impl<'a> BoundStack<'a> {
             asserted: None,
         };
         let mut idx = 0usize;
-        while let Some(row) = merge.next_kv() {
+        while let Some(row) = merge.next_borrowed() {
             let (k, v) = row?;
             let at = idx;
             idx += 1;
-            let Some(vld) = tail_validity(&k) else { continue };
+            let Some(vld) = tail_validity(k) else { continue };
             if at == 0 {
                 state.live = vld.is_assert.0;
             }
             if vld.is_assert.0 {
-                state.asserted = Some(v);
+                // The one value worth keeping; every tombstone before it is only read.
+                state.asserted = Some(v.to_vec());
                 break;
             }
         }
