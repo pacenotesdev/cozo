@@ -66,9 +66,6 @@ pub(crate) fn tail_validity(key: &[u8]) -> Option<Validity> {
 }
 
 /// The identity of an encoded key: everything before the trailing validity.
-///
-/// A borrow, not a copy. Callers that only need to tell one key's versions apart should use
-/// this rather than [`KeyBounds`], which needs a buffer to fill.
 pub(crate) fn validity_identity(key: &[u8]) -> &[u8] {
     debug_assert!(key.len() >= VLD_ENCODED_LEN);
     &key[..key.len() - VLD_ENCODED_LEN]
@@ -131,7 +128,7 @@ fn validity_marker(ts: i64) -> [u8; 9] {
 /// key ends.
 pub(crate) fn contains_validity_ts(buf: &[u8], ts: i64) -> bool {
     let marker = validity_marker(ts);
-    buf.windows(marker.len()).any(|w| w == marker)
+    find_marker(buf, &marker, 0).is_some()
 }
 
 /// Rewrite every encoded validity stamped `from` to be stamped `to`, in place. Returns how many
@@ -141,16 +138,29 @@ pub(crate) fn restamp_all_validity(buf: &mut [u8], from: i64, to: i64) -> usize 
     let new = validity_marker(to);
     let mut rewritten = 0;
     let mut at = 0;
-    while at + old.len() <= buf.len() {
-        if buf[at..at + old.len()] == old {
-            buf[at..at + old.len()].copy_from_slice(&new);
-            at += old.len();
-            rewritten += 1;
-        } else {
-            at += 1;
-        }
+    while let Some(found) = find_marker(buf, &old, at) {
+        buf[found..found + old.len()].copy_from_slice(&new);
+        at = found + old.len();
+        rewritten += 1;
     }
     rewritten
+}
+
+/// The first offset at or after `from` where `marker` occurs in `buf`.
+///
+/// A marker always begins with `VLD_TAG`, so candidate offsets are found by searching for that
+/// byte rather than by comparing at every position.
+fn find_marker(buf: &[u8], marker: &[u8; 9], from: usize) -> Option<usize> {
+    let last = buf.len().checked_sub(marker.len())?;
+    let mut at = from;
+    while at <= last {
+        let found = at + memchr::memchr(VLD_TAG, &buf[at..=last])?;
+        if buf[found..found + marker.len()] == *marker {
+            return Some(found);
+        }
+        at = found + 1;
+    }
+    None
 }
 
 /// Overwrite the timestamp of the validity that terminates an encoded key.
