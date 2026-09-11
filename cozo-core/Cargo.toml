@@ -29,6 +29,8 @@ minimal = ["storage-sqlite", "storage-sqlite-src"]
 storage-sqlite = ["dep:sqlite"]
 storage-sqlite-src = ["dep:sqlite3-src", "sqlite3-src/bundled"]
 ## Enables the [RocksDB](http://rocksdb.org/) backend.
+## Cannot be combined with `storage-new-rocksdb` or `storage-layered`: those link a second,
+## separately built RocksDB, and two static copies in one binary export the same symbols.
 ## RocksDB is hard to compile on some platforms, uses more resources than SQLite,
 ## but is very performant and supports an extremely high level of concurrency.
 ## You can also [fine-tune](https://github.com/cozodb/cozo/blob/main/TUNING_ROCKSDB.md) RocksDB options.
