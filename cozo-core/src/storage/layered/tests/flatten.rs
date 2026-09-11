@@ -8,6 +8,17 @@ use miette::Result;
 use super::{base, frontier, Fixture};
 use crate::storage::layered::{LayerRef, Stack};
 
+/// The claims on a conflict as `(layer, value)`, sorted so a test can compare them.
+fn claims_of(conflict: &crate::storage::layered::flatten::FlattenConflict) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = conflict
+        .claims
+        .iter()
+        .map(|c| (c.layer.clone(), super::as_str(&c.value[0])))
+        .collect();
+    out.sort();
+    out
+}
+
 /// A branch over the base at the current sequence, plus the whole-layer view of it.
 fn branch(f: &Fixture, name: &str) -> Result<(Stack, Stack)> {
     f.db.create_layer(name)?;
@@ -303,29 +314,26 @@ fn a_plan_reports_every_conflict() -> Result<()> {
     assert!(!plan.is_clean());
     assert_eq!(plan.conflicts.len(), 3, "{:?}", plan.conflicts);
 
-    let mut seen: Vec<(String, String, String)> = plan
+    let mut seen: Vec<(String, Vec<(String, String)>)> = plan
         .conflicts
         .iter()
         .map(|c| {
             assert_eq!(c.relation, "rec");
             // The key decodes to its columns, the identity first and the validity last.
-            let id = super::as_str(&c.key[0]);
-            (
-                id,
-                super::as_str(&c.existing[0]),
-                super::as_str(&c.incoming[0]),
-            )
+            (super::as_str(&c.key[0]), claims_of(c))
         })
         .collect();
     seen.sort();
-    assert_eq!(
-        seen,
-        vec![
-            ("a".to_string(), "base-a".to_string(), "branch-a".to_string()),
-            ("b".to_string(), "base-b".to_string(), "branch-b".to_string()),
-            ("c".to_string(), "base-c".to_string(), "branch-c".to_string()),
-        ]
-    );
+    let expect = |id: &str, letter: &str| {
+        (
+            id.to_string(),
+            vec![
+                ("default".to_string(), format!("base-{letter}")),
+                ("work".to_string(), format!("branch-{letter}")),
+            ],
+        )
+    };
+    assert_eq!(seen, vec![expect("a", "a"), expect("b", "b"), expect("c", "c")]);
     Ok(())
 }
 
@@ -340,10 +348,14 @@ fn a_conflicted_flatten_names_what_collided() -> Result<()> {
     let before = f.versions(&base())?;
     let err = f.db.flatten(&view, &base(), true).unwrap_err();
     let msg = format!("{err:?}");
-    assert!(msg.contains("1 key(s) collide"), "unexpected error: {msg}");
+    assert!(
+        msg.contains("1 key(s) are claimed with more than one value"),
+        "unexpected error: {msg}"
+    );
     assert!(msg.contains("rec"), "the relation is not named: {msg}");
     assert!(msg.contains("from-base"), "the values are not named: {msg}");
     assert!(msg.contains("from-branch"), "the values are not named: {msg}");
+    assert!(msg.contains("work"), "the layers are not named: {msg}");
     assert_eq!(f.versions(&base())?, before, "the failed flatten wrote");
     Ok(())
 }
@@ -452,8 +464,13 @@ fn a_page_reports_conflicts_inline() -> Result<()> {
     match &page.items[0] {
         crate::storage::layered::flatten::FlattenItem::Conflict(c) => {
             assert_eq!(c.relation, "rec");
-            assert_eq!(super::as_str(&c.existing[0]), "from-base");
-            assert_eq!(super::as_str(&c.incoming[0]), "from-branch");
+            assert_eq!(
+                claims_of(c),
+                vec![
+                    ("default".to_string(), "from-base".to_string()),
+                    ("work".to_string(), "from-branch".to_string()),
+                ]
+            );
         }
         other => panic!("expected a conflict, got {other:?}"),
     }
@@ -481,8 +498,6 @@ fn a_layer_cannot_be_flattened_into_itself() -> Result<()> {
 /// choose between them, and the disagreement is reported rather than silently resolved.
 #[test]
 fn siblings_in_one_source_view_do_not_resolve_by_stamp() -> Result<()> {
-    use crate::storage::layered::flatten::ConflictKind;
-
     let f = Fixture::new()?;
     let fork = f.seq();
     f.db.create_layer("a")?;
@@ -497,20 +512,22 @@ fn siblings_in_one_source_view_do_not_resolve_by_stamp() -> Result<()> {
     let plan = f.db.flatten_plan(&both, &base())?;
     assert!(!plan.is_clean(), "the disagreement was resolved silently");
     assert_eq!(plan.conflicts.len(), 1);
-    assert_eq!(plan.conflicts[0].kind, ConflictKind::Source);
     assert_eq!(plan.stats.rows_copied, 0, "neither value may be written");
-
-    let mut values = vec![
-        super::as_str(&plan.conflicts[0].existing[0]),
-        super::as_str(&plan.conflicts[0].incoming[0]),
-    ];
-    values.sort();
-    assert_eq!(values, vec!["from-a".to_string(), "from-b".to_string()]);
+    assert_eq!(
+        claims_of(&plan.conflicts[0]),
+        vec![
+            ("a".to_string(), "from-a".to_string()),
+            ("b".to_string(), "from-b".to_string()),
+        ],
+        "each claim should name the layer holding it"
+    );
 
     // And the flatten refuses rather than picking a winner.
     let before = f.versions(&base())?;
     let err = f.db.flatten(&both, &base(), true).unwrap_err();
-    assert!(format!("{err:?}").contains("collide"), "{err:?}");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("more than one value"), "{msg}");
+    assert!(msg.contains("a=") && msg.contains("b="), "claims are not labelled: {msg}");
     assert_eq!(f.versions(&base())?, before);
     Ok(())
 }
@@ -561,3 +578,107 @@ fn a_long_version_chain_is_not_a_disagreement() -> Result<()> {
     Ok(())
 }
 
+
+
+/// A key claimed by two source layers and by the destination reports all three claims at once.
+///
+/// This is what makes the report complete rather than a first-check-wins verdict: the
+/// destination is consulted even after the source view has already disagreed with itself, so
+/// resolving one claim cannot uncover another that was hidden behind it.
+#[test]
+fn every_claim_is_reported_in_one_pass() -> Result<()> {
+    let f = Fixture::new()?;
+    let fork = f.seq();
+    for name in ["a", "b", "c"] {
+        f.db.create_layer(name)?;
+    }
+    let a: Stack = vec![LayerRef::new("a"), LayerRef::bounded("default", fork)];
+    let b: Stack = vec![LayerRef::new("b"), LayerRef::bounded("default", fork)];
+    let c: Stack = vec![LayerRef::new("c"), LayerRef::bounded("default", fork)];
+
+    // Three siblings, none able to see the others, each claiming a different value.
+    f.assert_rec(&a, "k", "from-a")?;
+    f.assert_rec(&b, "k", "from-b")?;
+    f.assert_rec(&c, "k", "from-c")?;
+
+    // The source view holds two of the claims; the destination holds the third.
+    let src: Stack = vec![LayerRef::new("a"), LayerRef::new("b")];
+    let plan = f.db.flatten_plan(&src, &c)?;
+    assert_eq!(plan.conflicts.len(), 1, "{:?}", plan.conflicts);
+    assert_eq!(
+        claims_of(&plan.conflicts[0]),
+        vec![
+            ("a".to_string(), "from-a".to_string()),
+            ("b".to_string(), "from-b".to_string()),
+            ("c".to_string(), "from-c".to_string()),
+        ]
+    );
+    assert_eq!(plan.stats.rows_copied, 0);
+    Ok(())
+}
+
+/// A destination that agrees with the source is not a claim of its own: the same value held on
+/// both sides is one claim, not two.
+#[test]
+fn an_agreeing_destination_adds_no_claim() -> Result<()> {
+    let f = Fixture::new()?;
+    let fork = f.seq();
+    for name in ["a", "b", "c"] {
+        f.db.create_layer(name)?;
+    }
+    let a: Stack = vec![LayerRef::new("a"), LayerRef::bounded("default", fork)];
+    let b: Stack = vec![LayerRef::new("b"), LayerRef::bounded("default", fork)];
+    let c: Stack = vec![LayerRef::new("c"), LayerRef::bounded("default", fork)];
+
+    f.assert_rec(&a, "k", "from-a")?;
+    f.assert_rec(&b, "k", "from-b")?;
+    // The destination happens to hold what one of the source layers holds.
+    f.assert_rec(&c, "k", "from-a")?;
+
+    let src: Stack = vec![LayerRef::new("a"), LayerRef::new("b")];
+    let plan = f.db.flatten_plan(&src, &c)?;
+    assert_eq!(plan.conflicts.len(), 1);
+    let claims = claims_of(&plan.conflicts[0]);
+    assert_eq!(claims.len(), 2, "the agreeing value was counted twice: {claims:?}");
+    assert_eq!(
+        claims,
+        vec![
+            ("a".to_string(), "from-a".to_string()),
+            ("b".to_string(), "from-b".to_string()),
+        ]
+    );
+    Ok(())
+}
+
+/// A paged row says whether it asserts, so a diff can tell an addition from a removal without
+/// decoding the validity back out of the key.
+#[test]
+fn a_paged_row_says_whether_it_asserts() -> Result<()> {
+    use crate::storage::layered::flatten::FlattenItem;
+
+    let f = Fixture::new()?;
+    f.assert_rec(&base(), "gone", "v0")?;
+    let (work, view) = branch(&f, "work")?;
+
+    f.assert_rec(&work, "added", "v1")?;
+    f.retract_rec(&work, "gone")?;
+
+    let page = f.db.flatten_page(&view, &base(), None, 10)?;
+    assert_eq!(page.items.len(), 2, "{:?}", page.items);
+
+    let mut seen: Vec<(String, bool)> = page
+        .items
+        .iter()
+        .map(|item| match item {
+            FlattenItem::Copy { key, asserts, .. } => (super::as_str(&key[0]), *asserts),
+            other => panic!("expected a copy, got {other:?}"),
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![("added".to_string(), true), ("gone".to_string(), false)],
+        "the branch added one record and removed another"
+    );
+    Ok(())
+}

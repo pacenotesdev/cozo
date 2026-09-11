@@ -97,7 +97,7 @@ fn a_collision_invisible_to_the_branch_is_caught_at_the_merge() -> Result<()> {
         .flatten(&vec![LayerRef::new("work")], &base(), true)
         .unwrap_err();
     assert!(
-        format!("{err:?}").contains("different value"),
+        format!("{err:?}").contains("more than one value"),
         "unexpected error: {err:?}"
     );
     // Nothing was written: the base is exactly as it was.

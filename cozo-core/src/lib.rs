@@ -64,8 +64,7 @@ pub use storage::rocks::{new_cozo_rocksdb, RocksDbStorage};
 pub use storage::newrocks::{new_cozo_newrocksdb, NewRocksDbStorage};
 #[cfg(feature = "storage-layered")]
 pub use storage::layered::flatten::{
-    ConflictKind, FlattenConflict, FlattenCursor, FlattenItem, FlattenPage, FlattenPlan,
-    FlattenStats,
+    Claim, FlattenConflict, FlattenCursor, FlattenItem, FlattenPage, FlattenPlan, FlattenStats,
 };
 #[cfg(feature = "storage-layered")]
 pub use storage::layered::{

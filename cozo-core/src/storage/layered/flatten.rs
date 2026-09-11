@@ -36,46 +36,31 @@ pub struct FlattenStats {
     pub seq_range: Option<(Seq, Seq)>,
 }
 
-/// Which two sides of a flatten disagree about a key.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConflictKind {
-    /// The source view asserts a value the destination disagrees with.
-    Destination,
-    /// Two layers of the source view assert different values for one key. Reachable when the
-    /// source spans branches that forked from a common base and never saw one another's
-    /// writes, so each write was legal where it was made.
-    ///
-    /// Covers disagreement about a value only. One branch retracting a key while another
-    /// asserts it is not reported: within a single lineage that is ordinary undeleting, and
-    /// the two are indistinguishable without per-row layer provenance. Differing values need
-    /// no provenance, since a write able to see the other value would have been refused.
-    ///
-    /// Merging diverged branches means scanning each against their common base and
-    /// adjudicating the results, where each side's contribution is known separately.
-    Source,
+/// One value claimed for a key, and the layer claiming it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Claim {
+    /// The value columns.
+    pub value: Vec<DataValue>,
+    /// The layer holding this value.
+    pub layer: String,
 }
 
-/// One key given two different values by two lineages that could not see each other.
+/// One key that more than one layer claims a different value for.
 ///
 /// Under value immutability a key's value never changes, so this never arises within one
-/// lineage. It arises between them: each branch's window predates the other's write, so both
-/// writes were legal where they were made, and neither the destination's version nor the
-/// larger stamp is entitled to win. No merge can choose without a policy the storage layer
-/// does not have, so it reports and refuses.
+/// lineage. It arises between lineages: each window predates the other's write, so every claim
+/// was legal where it was made, and none of them is privileged. Choosing between them needs a
+/// policy the storage layer does not have, so it reports every claim and refuses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FlattenConflict {
-    /// Which two sides disagree.
-    pub kind: ConflictKind,
     /// The relation the key belongs to.
     pub relation: String,
     /// The key, decoded. Its last element is the validity the view holds the row at.
     pub key: Vec<DataValue>,
-    /// For [`ConflictKind::Destination`], the value the destination already holds. For
-    /// [`ConflictKind::Source`], the value carried by the older of the two disagreeing
-    /// assertions.
-    pub existing: Vec<DataValue>,
-    /// The value the view would write: its newest assertion under this key.
-    pub incoming: Vec<DataValue>,
+    /// Every distinct value claimed for this key, with the layer claiming it. Always two or
+    /// more, and always complete: both the source view and the destination are consulted, so
+    /// resolving one claim cannot reveal another that was hidden.
+    pub claims: Vec<Claim>,
 }
 
 /// What a flatten *would* do, computed without writing anything.
@@ -113,8 +98,11 @@ pub enum FlattenItem {
         relation: String,
         /// The key, decoded. Its last element is the validity the view holds the row at.
         key: Vec<DataValue>,
-        /// The value columns.
+        /// The value columns. Empty for a retraction.
         value: Vec<DataValue>,
+        /// Whether the row asserts. A diff reads this as added rather than removed, without
+        /// having to decode the validity back out of the key.
+        asserts: bool,
     },
     /// A record the destination already holds live, identically.
     Dedupe {
@@ -168,20 +156,15 @@ enum RowEffect<'r> {
         key: &'r [u8],
         val: &'r [u8],
         /// Whether the row asserts. A diff reads this as added versus removed.
-        #[allow(dead_code)]
         asserts: bool,
     },
     /// The destination already holds this record, identically and live.
     Redundant { key: &'r [u8] },
     /// A retraction of a record the destination never held live.
     Inert { key: &'r [u8] },
-    /// One key, two values.
-    Divergent {
-        key: &'r [u8],
-        existing: &'r [u8],
-        incoming: &'r [u8],
-        kind: ConflictKind,
-    },
+    /// One key with more than one claimed value. Conflicts are bounded by construction, so
+    /// unlike the other arms this one is built rather than borrowed.
+    Divergent(FlattenConflict),
 }
 
 /// The O(1) state one identity accumulates while its versions stream past.
@@ -191,16 +174,25 @@ struct Resolved {
     key: Vec<u8>,
     val: Vec<u8>,
     asserts: bool,
-    /// The newest assertive value, which under value immutability every assertion under this
-    /// key should carry.
-    asserted: Option<Vec<u8>>,
-    /// An assertion that carries a different one. Its existence is the invariant breach.
-    divergent: Option<Vec<u8>>,
+    /// The newest assertive value and the layer holding it. Under value immutability every
+    /// assertion under this key should carry the same value.
+    asserted: Option<(Vec<u8>, Option<usize>)>,
+    /// Any assertion carrying a different value, with its layer. Empty unless the source view
+    /// disagrees with itself, so the ordinary path allocates nothing for it.
+    others: Vec<(Vec<u8>, Option<usize>)>,
+}
+
+/// The name of a layer by index, for labelling a claim.
+fn layer_name(layers: &[BoundLayer<'_>], at: Option<usize>) -> String {
+    at.and_then(|i| layers.get(i))
+        .map(|l| l.name.clone())
+        .unwrap_or_else(|| "<unknown>".to_string())
 }
 
 /// Decide one resolved identity against the destination and hand it to the visitor.
 fn emit<F>(
     txn: &LayeredTxn<'_>,
+    src_layers: &[BoundLayer<'_>],
     dst: &mut BoundStack<'_>,
     rel: &RelInfo,
     done: Resolved,
@@ -209,32 +201,55 @@ fn emit<F>(
 where
     F: FnMut(&RelInfo, RowEffect<'_>) -> Result<ControlFlow<()>>,
 {
+    // The destination is consulted whatever the source view says, so a key that both sides
+    // disagree about reports every claim at once rather than one now and one on a retry.
     let state = dst.key_state(txn, &done.key)?;
-    let effect = if let (Some(other), Some(newest)) = (&done.divergent, &done.asserted) {
-        // Two source layers disagree. Reported before the destination is consulted: the view
-        // is not self-consistent, so what the destination holds cannot settle it.
-        RowEffect::Divergent {
-            key: &done.key,
-            existing: other,
-            incoming: newest,
-            kind: ConflictKind::Source,
+    let dst_disagrees = done.asserts && matches!(&state.asserted, Some(v) if *v != done.val);
+
+    let effect = if !done.others.is_empty() || dst_disagrees {
+        let mut claims = vec![];
+        if let Some((val, at)) = &done.asserted {
+            claims.push(Claim {
+                value: decode_values(val),
+                layer: layer_name(src_layers, *at),
+            });
         }
+        for (val, at) in &done.others {
+            claims.push(Claim {
+                value: decode_values(val),
+                layer: layer_name(src_layers, *at),
+            });
+        }
+        if let Some(val) = &state.asserted {
+            let already = done
+                .asserted
+                .iter()
+                .map(|(v, _)| v)
+                .chain(done.others.iter().map(|(v, _)| v))
+                .any(|v| v == val);
+            if !already {
+                claims.push(Claim {
+                    value: decode_values(val),
+                    layer: layer_name(&dst.layers, state.asserted_layer),
+                });
+            }
+        }
+        RowEffect::Divergent(FlattenConflict {
+            relation: rel.name.to_string(),
+            key: decode_tuple_from_key(&done.key, rel.n_keys),
+            claims,
+        })
     } else if done.asserts {
-        match state.asserted {
-            Some(ref existing) if *existing != done.val => RowEffect::Divergent {
-                key: &done.key,
-                existing,
-                incoming: &done.val,
-                kind: ConflictKind::Destination,
-            },
+        if state.asserted.is_some() && state.live {
             // Already there, identical: the same record cherry-picked into a lineage that
             // already carries it.
-            Some(_) if state.live => RowEffect::Redundant { key: &done.key },
-            _ => RowEffect::Effective {
+            RowEffect::Redundant { key: &done.key }
+        } else {
+            RowEffect::Effective {
                 key: &done.key,
                 val: &done.val,
                 asserts: true,
-            },
+            }
         }
     } else if state.live {
         RowEffect::Effective {
@@ -247,6 +262,7 @@ where
         // flatten simpler than the union of its inputs.
         RowEffect::Inert { key: &done.key }
     };
+
     Ok(match visit(rel, effect)? {
         ControlFlow::Break(()) => ControlFlow::Break(done.key),
         ControlFlow::Continue(()) => ControlFlow::Continue(()),
@@ -329,7 +345,7 @@ where
         // record asserted and retracted many times has a long one.
         let mut cur: Option<Resolved> = None;
         while let Some(row) = merge.next_borrowed() {
-            let (key, val) = row?;
+            let (at_layer, key, val) = row?;
             let Some(vld) = tail_validity(key) else {
                 bail!(
                     "relation '{}' has no validity but holds rows in a view being flattened; \
@@ -348,9 +364,11 @@ where
                 Some(c) if c.identity == identity => {
                     if asserts {
                         match &c.asserted {
-                            None => c.asserted = Some(val.to_vec()),
-                            Some(newest) if newest != val && c.divergent.is_none() => {
-                                c.divergent = Some(val.to_vec())
+                            None => c.asserted = Some((val.to_vec(), Some(at_layer))),
+                            Some((newest, _)) if newest != val => {
+                                if !c.others.iter().any(|(seen, _)| seen == val) {
+                                    c.others.push((val.to_vec(), Some(at_layer)));
+                                }
                             }
                             Some(_) => {}
                         }
@@ -359,46 +377,33 @@ where
                 _ => {
                     if let Some(done) = cur.take() {
                         if let ControlFlow::Break(at) =
-                            emit(txn, dst, rel, done, &mut visit)?
+                            emit(txn, src_layers, dst, rel, done, &mut visit)?
                         {
                             return Ok(Some(at));
                         }
                     }
                     cur = Some(Resolved {
                         identity: identity.to_vec(),
-                        asserted: if asserts { Some(val.to_vec()) } else { None },
+                        asserted: if asserts {
+                            Some((val.to_vec(), Some(at_layer)))
+                        } else {
+                            None
+                        },
                         key: key.to_vec(),
                         val: val.to_vec(),
                         asserts,
-                        divergent: None,
+                        others: vec![],
                     });
                 }
             }
         }
         if let Some(done) = cur.take() {
-            if let ControlFlow::Break(at) = emit(txn, dst, rel, done, &mut visit)? {
+            if let ControlFlow::Break(at) = emit(txn, src_layers, dst, rel, done, &mut visit)? {
                 return Ok(Some(at));
             }
         }
     }
     Ok(None)
-}
-
-/// Describe one collision in decoded terms, so a caller never has to parse a stored key.
-fn conflict_at(
-    rel: &RelInfo,
-    key: &[u8],
-    existing: &[u8],
-    incoming: &[u8],
-    kind: ConflictKind,
-) -> FlattenConflict {
-    FlattenConflict {
-        kind,
-        relation: rel.name.to_string(),
-        key: decode_tuple_from_key(key, rel.n_keys),
-        existing: decode_values(existing),
-        incoming: decode_values(incoming),
-    }
 }
 
 fn decode_values(val: &[u8]) -> Vec<DataValue> {
@@ -459,7 +464,7 @@ impl Db<LayeredStorage> {
             &mut ctx.dst,
             &ctx.relations,
             None,
-            |rel, effect| {
+            |_rel, effect| {
                 match effect {
                     RowEffect::Effective { key, val, .. } => {
                         plan.stats.rows_copied += 1;
@@ -467,14 +472,7 @@ impl Db<LayeredStorage> {
                     }
                     RowEffect::Redundant { .. } => plan.stats.rows_deduped += 1,
                     RowEffect::Inert { .. } => plan.stats.tombstones_dropped += 1,
-                    RowEffect::Divergent {
-                        key,
-                        existing,
-                        incoming,
-                        kind,
-                    } => plan
-                        .conflicts
-                        .push(conflict_at(rel, key, existing, incoming, kind)),
+                    RowEffect::Divergent(conflict) => plan.conflicts.push(conflict),
                 }
                 Ok(ControlFlow::Continue(()))
             },
@@ -512,10 +510,11 @@ impl Db<LayeredStorage> {
                 }
                 let relation = rel.name.to_string();
                 items.push(match effect {
-                    RowEffect::Effective { key, val, .. } => FlattenItem::Copy {
+                    RowEffect::Effective { key, val, asserts } => FlattenItem::Copy {
                         relation,
                         key: decode_tuple_from_key(key, rel.n_keys),
                         value: decode_values(val),
+                        asserts,
                     },
                     RowEffect::Redundant { key } => FlattenItem::Dedupe {
                         relation,
@@ -525,14 +524,7 @@ impl Db<LayeredStorage> {
                         relation,
                         key: decode_tuple_from_key(key, rel.n_keys),
                     },
-                    RowEffect::Divergent {
-                        key,
-                        existing,
-                        incoming,
-                        kind,
-                    } => FlattenItem::Conflict(conflict_at(
-                        rel, key, existing, incoming, kind,
-                    )),
+                    RowEffect::Divergent(conflict) => FlattenItem::Conflict(conflict),
                 });
                 Ok(if items.len() >= limit {
                     ControlFlow::Break(())
@@ -596,7 +588,7 @@ impl Db<LayeredStorage> {
             &mut ctx.dst,
             &ctx.relations,
             None,
-            |rel, effect| {
+            |_rel, effect| {
                 match effect {
                     RowEffect::Effective { key, val, .. } => {
                         let mut key = key.to_vec();
@@ -616,12 +608,7 @@ impl Db<LayeredStorage> {
                     }
                     RowEffect::Redundant { .. } => stats.rows_deduped += 1,
                     RowEffect::Inert { .. } => stats.tombstones_dropped += 1,
-                    RowEffect::Divergent {
-                        key,
-                        existing,
-                        incoming,
-                        kind,
-                    } => conflicts.push(conflict_at(rel, key, existing, incoming, kind)),
+                    RowEffect::Divergent(conflict) => conflicts.push(conflict),
                 }
                 Ok(ControlFlow::Continue(()))
             },
@@ -649,15 +636,14 @@ impl Db<LayeredStorage> {
 fn describe_conflicts(conflicts: &[FlattenConflict]) -> String {
     const SHOWN: usize = 5;
     let mut msg = format!(
-        "flatten aborted: {} key(s) collide; the destination already holds a different value \
-         under a key the view asserts",
+        "flatten aborted: {} key(s) are claimed with more than one value",
         conflicts.len()
     );
     for c in conflicts.iter().take(SHOWN) {
-        msg.push_str(&format!(
-            "\n  {} {:?}: destination {:?}, view {:?}",
-            c.relation, c.key, c.existing, c.incoming
-        ));
+        msg.push_str(&format!("\n  {} {:?}:", c.relation, c.key));
+        for claim in &c.claims {
+            msg.push_str(&format!(" {}={:?}", claim.layer, claim.value));
+        }
     }
     if conflicts.len() > SHOWN {
         msg.push_str(&format!(

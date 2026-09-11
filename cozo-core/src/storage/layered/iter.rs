@@ -222,7 +222,10 @@ impl<'a> StackMerge<'a> {
         best
     }
 
-    /// The next row, borrowed from the layer holding it.
+    /// The next row, borrowed from the layer holding it, with that layer's index.
+    ///
+    /// The index is returned alongside rather than through an accessor because the row borrows
+    /// the merge, so nothing else can be asked of it while the row is in hand.
     ///
     /// The borrow lasts until the next call, which is what the `&mut self` receiver enforces:
     /// advancing invalidates the underlying iterator's buffer, so nothing may outlive it. A
@@ -230,7 +233,7 @@ impl<'a> StackMerge<'a> {
     ///
     /// Advancing happens at the start of the following call rather than before returning,
     /// which is what lets this stay a single call per row.
-    pub(crate) fn next_borrowed(&mut self) -> Option<Result<(&[u8], &[u8])>> {
+    pub(crate) fn next_borrowed(&mut self) -> Option<Result<(usize, &[u8], &[u8])>> {
         if self.positioned {
             if let Err(err) = self.advance_front() {
                 return Some(Err(err));
@@ -245,6 +248,7 @@ impl<'a> StackMerge<'a> {
         self.positioned = true;
         let layer = &self.layers[front];
         Some(Ok((
+            front,
             layer.key().unwrap(),
             layer.value().unwrap_or_default(),
         )))
@@ -286,7 +290,10 @@ impl<'a> StackRawIter<'a> {
                 return Some(Err(err));
             }
         }
-        self.merge.next_borrowed()
+        match self.merge.next_borrowed()? {
+            Ok((_, key, val)) => Some(Ok((key, val))),
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
@@ -350,7 +357,7 @@ impl<'a> Iterator for StackSkipIter<'a> {
             match self.merge.next_borrowed() {
                 None => return None,
                 Some(Err(err)) => return Some(Err(err)),
-                Some(Ok((k, v))) => {
+                Some(Ok((_, k, v))) => {
                     // Everything needing the borrows happens first; a skipped row, which is
                     // the common case here, is never copied.
                     let (ret, nxt_bound) = check_key_for_validity(k, self.valid_at, None);

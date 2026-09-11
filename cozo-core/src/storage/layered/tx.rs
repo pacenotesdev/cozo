@@ -68,10 +68,11 @@ impl<'a> BoundStack<'a> {
         let mut state = KeyState {
             live: false,
             asserted: None,
+            asserted_layer: None,
         };
         let mut idx = 0usize;
         while let Some(row) = merge.next_borrowed() {
-            let (k, v) = row?;
+            let (at_layer, k, v) = row?;
             let at = idx;
             idx += 1;
             let Some(vld) = tail_validity(k) else { continue };
@@ -81,6 +82,7 @@ impl<'a> BoundStack<'a> {
             if vld.is_assert.0 {
                 // The one value worth keeping; every tombstone before it is only read.
                 state.asserted = Some(v.to_vec());
+                state.asserted_layer = Some(at_layer);
                 break;
             }
         }
@@ -259,6 +261,8 @@ pub(crate) struct KeyState {
     /// The value of the newest visible assertion, if the key was ever asserted. Under value
     /// immutability every assertion under a key carries this same value.
     pub(crate) asserted: Option<Vec<u8>>,
+    /// Which layer of the stack holds `asserted`, as an index into its layers.
+    pub(crate) asserted_layer: Option<usize>,
 }
 
 impl<'s> StoreTx<'s> for LayeredTx<'s> {
