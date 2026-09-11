@@ -62,6 +62,14 @@ pub use storage::mem::{new_cozo_mem, MemStorage};
 pub use storage::rocks::{new_cozo_rocksdb, RocksDbStorage};
 #[cfg(feature = "storage-new-rocksdb")]
 pub use storage::newrocks::{new_cozo_newrocksdb, NewRocksDbStorage};
+#[cfg(feature = "storage-layered")]
+pub use storage::layered::flatten::{
+    Claim, FlattenConflict, FlattenCursor, FlattenItem, FlattenPage, FlattenPlan, FlattenStats,
+};
+#[cfg(feature = "storage-layered")]
+pub use storage::layered::{
+    new_cozo_layered, LayerId, LayerRef, LayeredStorage, Seq, Stack, DEFAULT_LAYER,
+};
 #[cfg(feature = "storage-sled")]
 pub use storage::sled::{new_cozo_sled, SledStorage};
 #[cfg(feature = "storage-sqlite")]

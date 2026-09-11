@@ -32,7 +32,6 @@ use serde_json::json;
 use smartstring::{LazyCompact, SmartString};
 use thiserror::Error;
 
-use crate::data::functions::current_validity;
 use crate::data::json::JsonValue;
 use crate::data::program::{InputProgram, QueryAssertion, RelationOp, ReturnMutation};
 use crate::data::relation::ColumnDef;
@@ -259,6 +258,18 @@ pub enum TransactionPayload {
     Query(Payload),
 }
 
+impl<S: Clone> Db<S> {
+    /// The same database, reached through a different storage handle. Everything else
+    /// (relation locks, callbacks, running queries, the temp store) is shared, so the two
+    /// handles are the same database in every respect except how storage is addressed.
+    #[allow(dead_code)]
+    pub(crate) fn with_storage(&self, db: S) -> Self {
+        let mut ret = self.clone();
+        ret.db = db;
+        ret
+    }
+}
+
 impl<'s, S: Storage<'s>> Db<S> {
     /// Create a new database object with the given storage.
     /// You must call [`initialize`](Self::initialize) immediately after creation.
@@ -315,7 +326,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
         };
 
-        let ts = current_validity();
+        let ts = self.db.now_validity();
         let callback_targets = self.current_callback_targets();
         let mut callback_collector = BTreeMap::new();
         let mut write_locks = BTreeMap::new();
@@ -406,14 +417,10 @@ impl<'s, S: Storage<'s>> Db<S> {
         params: BTreeMap<String, DataValue>,
         mutability: ScriptMutability,
     ) -> Result<NamedRows> {
+        let cur_vld = self.db.now_validity();
         self.run_script_ast(
-            parse_script(
-                payload,
-                &params,
-                &self.get_fixed_rules(),
-                current_validity(),
-            )?,
-            current_validity(),
+            parse_script(payload, &params, &self.get_fixed_rules(), cur_vld)?,
+            cur_vld,
             mutability,
         )
     }
@@ -510,7 +517,7 @@ impl<'s, S: Storage<'s>> Db<S> {
         let locks = self.obtain_relation_locks(rel_names.iter());
         let _guards = locks.iter().map(|l| l.read().unwrap()).collect_vec();
 
-        let cur_vld = current_validity();
+        let cur_vld = self.db.now_validity();
 
         let mut tx = self.transact_write()?;
 
