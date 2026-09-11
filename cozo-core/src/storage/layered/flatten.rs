@@ -207,7 +207,7 @@ where
     let dst_disagrees = done.asserts && matches!(&state.asserted, Some(v) if *v != done.val);
 
     let effect = if !done.others.is_empty() || dst_disagrees {
-        let mut claims = vec![];
+        let mut claims = Vec::with_capacity(done.others.len() + 2);
         if let Some((val, at)) = &done.asserted {
             claims.push(Claim {
                 value: decode_values(val),

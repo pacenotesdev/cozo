@@ -35,6 +35,7 @@ mod reads;
 mod restack;
 mod retraction;
 mod sequences;
+mod three_way;
 mod windows;
 
 /// One row as the store holds it: key, stamp, whether it asserts, and its value.
