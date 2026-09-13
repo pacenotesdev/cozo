@@ -10,7 +10,7 @@ use crate::data::expr::{eval_bytecode_pred, Bytecode};
 use crate::data::program::HnswSearch;
 use crate::data::relation::VecElementType;
 use crate::data::tuple::{Tuple, ENCODED_KEY_MIN_LEN};
-use crate::data::value::Vector;
+use crate::data::value::{ValidityTs, Vector};
 use crate::parse::sys::HnswDistance;
 use crate::runtime::relation::RelationHandle;
 use crate::runtime::transact::SessionTx;
@@ -56,6 +56,19 @@ type CompoundKey = (Tuple, usize, i32);
 
 struct VectorCache {
     cache: FxHashMap<CompoundKey, Vector>,
+    /// Base rows for records already fetched, keyed by the record key so the several compound
+    /// keys of one row share an entry. Populated only when a search predicate needs the row.
+    rows: FxHashMap<Tuple, Tuple>,
+    /// Record keys this transaction cannot read.
+    missing: FxHashSet<Tuple>,
+    /// Whether an unreadable record is fatal. Index maintenance says yes: it is writing the
+    /// graph against rows that must be there, and a miss means the two have diverged. Search
+    /// says no: the graph and the records it names are read independently, so a node the
+    /// reader cannot resolve is a visibility outcome rather than damage, and the traversal
+    /// steps over it.
+    lenient: bool,
+    /// Whether to retain fetched rows in `rows`.
+    keep_rows: bool,
     distance: HnswDistance,
 }
 
@@ -119,36 +132,253 @@ impl VectorCache {
     fn get_key(&self, key: &CompoundKey) -> &Vector {
         self.cache.get(key).unwrap()
     }
+    /// Whether `key` names a record this transaction could not read. Always false unless the
+    /// cache is lenient, because otherwise the miss would have been an error.
+    #[inline]
+    fn is_missing(&self, key: &CompoundKey) -> bool {
+        self.missing.contains(&key.0)
+    }
+
+    /// Record a fetched row: extract its vector, and retain the row itself if asked.
+    fn accept(&mut self, key: &CompoundKey, tuple: Tuple) -> Result<()> {
+        self.insert_from_tuple(key, &tuple)?;
+        if self.keep_rows {
+            self.rows.insert(key.0.clone(), tuple);
+        }
+        Ok(())
+    }
+
+    /// Record a row that was not there.
+    fn reject(&mut self, key: &CompoundKey) -> Result<()> {
+        if !self.lenient {
+            bail!("Cannot find compound key for HNSW: {:?}", key);
+        }
+        self.missing.insert(key.0.clone());
+        Ok(())
+    }
+
+    /// Whether `key` still needs fetching: not already cached, and not already known absent.
+    fn wanted(&self, key: &CompoundKey) -> bool {
+        !self.cache.contains_key(key) && !self.missing.contains(&key.0)
+    }
+
     fn ensure_key(
         &mut self,
         key: &CompoundKey,
         handle: &RelationHandle,
         tx: &SessionTx<'_>,
     ) -> Result<()> {
-        if !self.cache.contains_key(key) {
-            match handle.get(tx, &key.0)? {
-                Some(tuple) => {
-                    let mut field = &tuple[key.1];
-                    if key.2 >= 0 {
-                        match field {
-                            DataValue::List(l) => {
-                                field = &l[key.2 as usize];
-                            }
-                            _ => bail!("Cannot interpret {} as list", field),
-                        }
-                    }
-                    match field {
-                        DataValue::Vec(v) => {
-                            self.cache.insert(key.clone(), v.clone());
-                        }
-                        _ => bail!("Cannot interpret {} as vector", field),
-                    }
+        if !self.wanted(key) {
+            return Ok(());
+        }
+        // A sibling compound key of the same record may already have brought the row in.
+        if let Some(tuple) = self.rows.get(&key.0) {
+            let tuple = tuple.clone();
+            return self.insert_from_tuple(key, &tuple);
+        }
+        match handle.get(tx, &key.0)? {
+            Some(tuple) => self.accept(key, tuple),
+            None => self.reject(key),
+        }
+    }
+
+    fn insert_from_tuple(&mut self, key: &CompoundKey, tuple: &[DataValue]) -> Result<()> {
+        let mut field = &tuple[key.1];
+        if key.2 >= 0 {
+            match field {
+                DataValue::List(l) => {
+                    field = &l[key.2 as usize];
                 }
-                None => bail!("Cannot find compound key for HNSW: {:?}", key),
+                _ => bail!("Cannot interpret {} as list", field),
             }
+        }
+        match field {
+            DataValue::Vec(v) => {
+                self.cache.insert(key.clone(), v.clone());
+            }
+            _ => bail!("Cannot interpret {} as vector", field),
         }
         Ok(())
     }
+}
+
+/// Whether a node at `distance` is worth expanding: the result set is not yet full, or the
+/// node beats its furthest member.
+///
+/// An unfilled set admits without comparing at all. Expressing the relaxation as control flow
+/// rather than as an infinite sentinel keeps it correct whatever the comparison does with a
+/// distance that is not a number: under a total order that sorts NaN above every real
+/// distance, comparing against a sentinel would drop such a node out of the traversal and cut
+/// the graph around it.
+fn may_expand(
+    found_nn: &PriorityQueue<CompoundKey, OrderedFloat<f64>>,
+    ef: usize,
+    distance: f64,
+) -> bool {
+    match found_nn.peek() {
+        // Negated rather than written as `distance < furthest`, and deliberately: a distance
+        // that is not a number compares false against everything, so the negation keeps such a
+        // node routable instead of dropping it, and a NaN sitting in the result set as the
+        // furthest member cannot stall the walk. This is the polarity the search has always
+        // had; only the unfilled-set relaxation is new.
+        Some((_, OrderedFloat(furthest))) if found_nn.len() >= ef => !(distance >= *furthest),
+        _ => true,
+    }
+}
+
+/// Whether the walk is done: the result set is full and the nearest candidate left is further
+/// away than everything in it. An unfilled set never stops the walk, which is what keeps a
+/// selective search going instead of returning short.
+fn is_exhausted(
+    found_nn: &PriorityQueue<CompoundKey, OrderedFloat<f64>>,
+    ef: usize,
+    distance: f64,
+) -> bool {
+    match found_nn.peek() {
+        Some((_, OrderedFloat(furthest))) if found_nn.len() >= ef => distance > *furthest,
+        _ => false,
+    }
+}
+
+/// The conditions a node must meet to be returned by a search, applied during the traversal.
+///
+/// These were once a pass over the finished result set, which silently capped a search at
+/// however many of its first `ef` nodes happened to qualify. Asking here instead means `k`
+/// results come back whenever `k` qualifying nodes are reachable at all.
+///
+/// `radius` is not among them, and stays a cut over the finished set. It bounds distance, and
+/// the result set is ordered by distance, so the nearest `k` are the nearest `k` within any
+/// radius that holds `k` of them: there is no shortfall to fix. Asking it during the walk would
+/// also strand a search whose entry point happens to lie outside the radius.
+pub(crate) struct HnswAdmit<'a> {
+    config: &'a HnswSearch,
+    filter: &'a Option<(Vec<Bytecode>, SourceSpan)>,
+    /// Scratch for filter evaluation, both reused across candidates.
+    stack: Vec<DataValue>,
+    tuple: Tuple,
+    /// Per record, the version of it live at the query point, or `None` where it has none.
+    ///
+    /// Every version of a record is its own node, so a walk reaches the same record through
+    /// several of them and would otherwise ask the store the same question once per version.
+    live: FxHashMap<Tuple, Option<DataValue>>,
+}
+
+impl<'a> HnswAdmit<'a> {
+    fn new(config: &'a HnswSearch, filter: &'a Option<(Vec<Bytecode>, SourceSpan)>) -> Self {
+        HnswAdmit {
+            config,
+            filter,
+            stack: vec![],
+            tuple: vec![],
+            live: FxHashMap::default(),
+        }
+    }
+
+    /// Whether anything is actually asked of a candidate. When nothing is, the search reverts
+    /// to the plain nearest-neighbour walk.
+    fn is_trivial(&self) -> bool {
+        self.config.validity.is_none() && self.filter.is_none()
+    }
+
+    fn admits(
+        &mut self,
+        tx: &SessionTx<'_>,
+        key: &CompoundKey,
+        distance: f64,
+        vec_cache: &VectorCache,
+    ) -> Result<bool> {
+        if let Some(valid_at) = self.config.validity {
+            if !self.is_live(tx, key, valid_at)? {
+                return Ok(false);
+            }
+        }
+        let Some((code, span)) = self.filter else {
+            return Ok(true);
+        };
+        let Some(row) = vec_cache.rows.get(&key.0) else {
+            return Ok(false);
+        };
+        // Refilled rather than rebuilt, so a wide selective walk does not allocate a tuple
+        // per candidate it tests.
+        self.tuple.clear();
+        self.tuple.extend_from_slice(row);
+        push_search_bindings(&mut self.tuple, key, self.config, distance)?;
+        eval_bytecode_pred(code, &self.tuple, &mut self.stack, *span)
+    }
+
+    /// Whether `key` names the version of its record that is live at `valid_at`: an assertion,
+    /// and the newest one no later than that point.
+    fn is_live(
+        &mut self,
+        tx: &SessionTx<'_>,
+        key: &CompoundKey,
+        valid_at: ValidityTs,
+    ) -> Result<bool> {
+        let n_keys = self.config.base_handle.metadata.keys.len();
+        let DataValue::Validity(vld) = &key.0[n_keys - 1] else {
+            bail!(
+                "relation '{}' has no validity column",
+                self.config.base_handle.name
+            );
+        };
+        // Both of these are decidable from the key alone, so they never reach the store: a
+        // retraction is never live, and neither is a version later than the query point.
+        // Validity sorts newest first, so a later one compares less.
+        if !vld.is_assert.0 || vld.timestamp < valid_at {
+            return Ok(false);
+        }
+        let prefix = &key.0[..n_keys - 1];
+        if let Some(live) = self.live.get(prefix) {
+            return Ok(live.as_ref() == Some(&key.0[n_keys - 1]));
+        }
+        let live = tx.hnsw_live_version(self.config, prefix, valid_at)?;
+        let matched = live.as_ref() == Some(&key.0[n_keys - 1]);
+        self.live.insert(prefix.to_vec(), live);
+        Ok(matched)
+    }
+}
+
+/// Append the optional bindings a query asked for to a base row, turning it into the tuple a
+/// search returns for that node. The order has to match `HnswSearch::all_bindings`.
+fn push_search_bindings(
+    tuple: &mut Tuple,
+    key: &CompoundKey,
+    config: &HnswSearch,
+    distance: f64,
+) -> Result<()> {
+    let n_keys = config.base_handle.metadata.keys.len();
+    if config.bind_field.is_some() {
+        let field = if key.1 < n_keys {
+            config.base_handle.metadata.keys[key.1].name.clone()
+        } else {
+            config.base_handle.metadata.non_keys[key.1 - n_keys]
+                .name
+                .clone()
+        };
+        tuple.push(DataValue::Str(field));
+    }
+    if config.bind_field_idx.is_some() {
+        tuple.push(if key.2 < 0 {
+            DataValue::Null
+        } else {
+            DataValue::from(key.2 as i64)
+        });
+    }
+    if config.bind_distance.is_some() {
+        tuple.push(DataValue::from(distance));
+    }
+    if config.bind_vector.is_some() {
+        let vec = if key.2 < 0 {
+            tuple[key.1].clone()
+        } else {
+            match &tuple[key.1] {
+                DataValue::List(v) => v[key.2 as usize].clone(),
+                v => bail!("corrupted index value {:?}", v),
+            }
+        };
+        tuple.push(vec);
+    }
+    Ok(())
 }
 
 impl<'a> SessionTx<'a> {
@@ -225,6 +455,7 @@ impl<'a> SessionTx<'a> {
                     idx_table,
                     &mut found_nn,
                     vec_cache,
+                    None,
                 )?;
             }
             let mut self_tuple_key = Vec::with_capacity(orig_table.metadata.keys.len() * 2 + 5);
@@ -253,6 +484,7 @@ impl<'a> SessionTx<'a> {
                     idx_table,
                     &mut found_nn,
                     vec_cache,
+                    None,
                 )?;
                 // add bidirectional links to the nearest neighbors
                 let neighbours = self.hnsw_select_neighbours_heuristic(
@@ -545,6 +777,7 @@ impl<'a> SessionTx<'a> {
         idx_table: &RelationHandle,
         found_nn: &mut PriorityQueue<CompoundKey, OrderedFloat<f64>>,
         vec_cache: &mut VectorCache,
+        mut admit: Option<&mut HnswAdmit<'_>>,
     ) -> Result<()> {
         let mut visited: FxHashSet<CompoundKey> = FxHashSet::default();
         // min queue
@@ -556,10 +789,24 @@ impl<'a> SessionTx<'a> {
             candidates.push(item.0.clone(), Reverse(*item.1));
         }
 
+        // The entry points arrive as results of the level above, where nothing was asked of
+        // them but proximity. Re-test them here, so that a level whose job is to produce
+        // answers starts from an answer set it actually vouches for.
+        if let Some(admit) = admit.as_deref_mut() {
+            let seeds = found_nn
+                .iter()
+                .map(|(k, d)| (k.clone(), *d))
+                .collect::<Vec<_>>();
+            found_nn.clear();
+            for (key, OrderedFloat(dist)) in seeds {
+                if !vec_cache.is_missing(&key) && admit.admits(self, &key, dist, vec_cache)? {
+                    found_nn.push(key, OrderedFloat(dist));
+                }
+            }
+        }
+
         while let Some((candidate, Reverse(OrderedFloat(candidate_dist)))) = candidates.pop() {
-            let (_, OrderedFloat(furtherest_dist)) = found_nn.peek().unwrap();
-            let furtherest_dist = *furtherest_dist;
-            if candidate_dist > furtherest_dist {
+            if is_exhausted(found_nn, ef, candidate_dist) {
                 break;
             }
             // loop over each of the candidate's neighbors
@@ -569,16 +816,32 @@ impl<'a> SessionTx<'a> {
                 if visited.contains(&neighbour_key) {
                     continue;
                 }
+                // A node with no row has no vector, so it can neither be measured nor
+                // returned, and its own edges are unreachable from here.
                 vec_cache.ensure_key(&neighbour_key, orig_table, self)?;
-                let neighbour_dist = vec_cache.v_dist(q, &neighbour_key);
-                let (_, OrderedFloat(cand_furtherest_dist)) = found_nn.peek().unwrap();
-                if found_nn.len() < ef || neighbour_dist < *cand_furtherest_dist {
-                    candidates.push(neighbour_key.clone(), Reverse(OrderedFloat(neighbour_dist)));
-                    found_nn.push(neighbour_key.clone(), OrderedFloat(neighbour_dist));
-                    if found_nn.len() > ef {
-                        found_nn.pop();
+                if !vec_cache.is_missing(&neighbour_key) {
+                    let neighbour_dist = vec_cache.v_dist(q, &neighbour_key);
+                    if may_expand(found_nn, ef, neighbour_dist) {
+                        candidates
+                            .push(neighbour_key.clone(), Reverse(OrderedFloat(neighbour_dist)));
+                        // Only nodes that got this far pay for the predicate, so its cost
+                        // tracks the churn of the result set rather than the size of the walk.
+                        let admitted = match admit.as_deref_mut() {
+                            Some(admit) => {
+                                admit.admits(self, &neighbour_key, neighbour_dist, vec_cache)?
+                            }
+                            None => true,
+                        };
+                        if admitted {
+                            found_nn.push(neighbour_key.clone(), OrderedFloat(neighbour_dist));
+                            if found_nn.len() > ef {
+                                found_nn.pop();
+                            }
+                        }
                     }
                 }
+                // Taken by move, and last: a neighbour the distance test rejects costs no
+                // allocation at all.
                 visited.insert(neighbour_key);
             }
         }
@@ -709,6 +972,10 @@ impl<'a> SessionTx<'a> {
         }
         let mut vec_cache = VectorCache {
             cache: FxHashMap::default(),
+            rows: FxHashMap::default(),
+            missing: FxHashSet::default(),
+            lenient: false,
+            keep_rows: false,
             distance: manifest.distance,
         };
         for (vec, idx, sub) in extracted_vectors {
@@ -871,7 +1138,6 @@ impl<'a> SessionTx<'a> {
         q: Vector,
         config: &HnswSearch,
         filter_bytecode: &Option<(Vec<Bytecode>, SourceSpan)>,
-        stack: &mut Vec<DataValue>,
     ) -> Result<Vec<Tuple>> {
         if q.len() != config.manifest.vec_dim {
             bail!("query vector dimension mismatch");
@@ -885,130 +1151,200 @@ impl<'a> SessionTx<'a> {
 
         let mut vec_cache = VectorCache {
             cache: Default::default(),
+            rows: Default::default(),
+            missing: Default::default(),
+            lenient: true,
+            // Only the user filter reads the row itself; liveness works off the key.
+            keep_rows: filter_bytecode.is_some(),
             distance: config.manifest.distance,
         };
 
-        let ep_res = config
-            .idx_handle
-            .scan_bounded_prefix(
-                self,
-                &[],
-                &[DataValue::from(i64::MIN)],
-                &[DataValue::from(1)],
-            )
-            .next();
-        if let Some(ep) = ep_res {
+        // The graph is entered at its highest level. A stack that cannot read the entry
+        // point's record cannot measure it either, so walk on to the next one rather than
+        // giving up on the whole index.
+        let n_keys = config.base_handle.metadata.keys.len();
+        let mut entry = None;
+        for ep in config.idx_handle.scan_bounded_prefix(
+            self,
+            &[],
+            &[DataValue::from(i64::MIN)],
+            &[DataValue::from(1)],
+        ) {
             let ep = ep?;
-            let bottom_level = ep[0].get_int().unwrap();
-            let ep_idx = match ep[config.base_handle.metadata.keys.len() + 1].get_int() {
-                Some(x) => x as usize,
-                None => {
-                    // this occurs if the index is empty
-                    return Ok(vec![])
-                },
+            let Some(ep_idx) = ep[n_keys + 1].get_int() else {
+                // this occurs if the index is empty
+                return Ok(vec![]);
             };
-            let ep_t_key = ep[1..config.base_handle.metadata.keys.len() + 1].to_vec();
-            let ep_subidx = ep[config.base_handle.metadata.keys.len() + 2]
-                .get_int()
-                .unwrap() as i32;
-            let ep_key = (ep_t_key, ep_idx, ep_subidx);
-            vec_cache.ensure_key(&ep_key, &config.base_handle, self)?;
-            let ep_distance = vec_cache.v_dist(&q, &ep_key);
-            let mut found_nn = PriorityQueue::new();
-            found_nn.push(ep_key, OrderedFloat(ep_distance));
-            for current_level in bottom_level..0 {
-                self.hnsw_search_level(
-                    &q,
-                    1,
-                    current_level,
-                    &config.base_handle,
-                    &config.idx_handle,
-                    &mut found_nn,
-                    &mut vec_cache,
-                )?;
+            let candidate = (
+                ep[1..n_keys + 1].to_vec(),
+                ep_idx as usize,
+                ep[n_keys + 2].get_int().unwrap() as i32,
+            );
+            let bottom_level = ep[0].get_int().unwrap();
+            vec_cache.ensure_key(&candidate, &config.base_handle, self)?;
+            if !vec_cache.is_missing(&candidate) {
+                entry = Some((candidate, bottom_level));
+                break;
             }
+        }
+        let Some((ep_key, bottom_level)) = entry else {
+            return Ok(vec![]);
+        };
+
+        let ep_distance = vec_cache.v_dist(&q, &ep_key);
+        let mut found_nn = PriorityQueue::new();
+        found_nn.push(ep_key, OrderedFloat(ep_distance));
+        // The upper levels only route, so nothing is asked of the nodes they pass through.
+        for current_level in bottom_level..0 {
             self.hnsw_search_level(
                 &q,
-                config.ef,
-                0,
+                1,
+                current_level,
                 &config.base_handle,
                 &config.idx_handle,
                 &mut found_nn,
                 &mut vec_cache,
+                None,
             )?;
-            if found_nn.is_empty() {
-                return Ok(vec![]);
-            }
+        }
+        let mut admit = HnswAdmit::new(config, filter_bytecode);
+        let trivial = admit.is_trivial();
+        self.hnsw_search_level(
+            &q,
+            config.ef,
+            0,
+            &config.base_handle,
+            &config.idx_handle,
+            &mut found_nn,
+            &mut vec_cache,
+            if trivial { None } else { Some(&mut admit) },
+        )?;
+        if found_nn.is_empty() {
+            return Ok(vec![]);
+        }
 
-            if config.filter.is_none() {
-                while found_nn.len() > config.k {
-                    found_nn.pop();
+        // Nothing was asked of these nodes, so the rows behind all but the nearest `k` are
+        // about to be thrown away. Drop them before paying to read them.
+        // Everything still here already qualifies, so all but the nearest `k` are about to be
+        // thrown away. Drop them before paying to read their rows.
+        while found_nn.len() > config.k {
+            found_nn.pop();
+        }
+
+        let mut ret = Vec::with_capacity(found_nn.len());
+        while let Some((cand_key, OrderedFloat(distance))) = found_nn.pop() {
+            if let Some(radius) = config.radius {
+                if distance > radius {
+                    continue;
                 }
             }
-
-            let mut ret = vec![];
-
-            while let Some((cand_key, OrderedFloat(distance))) = found_nn.pop() {
-                if let Some(r) = config.radius {
-                    if distance > r {
-                        continue;
-                    }
-                }
-
-                let mut cand_tuple = config
+            // The row was already read during the traversal whenever a predicate needed it.
+            let mut row = match vec_cache.rows.get(&cand_key.0) {
+                Some(row) => row.clone(),
+                None => config
                     .base_handle
                     .get(self, &cand_key.0)?
-                    .ok_or_else(|| miette!("corrupted index"))?;
-
-                // make sure the order is the same as in all_bindings()!!!
-                if config.bind_field.is_some() {
-                    let field = if cand_key.1 < config.base_handle.metadata.keys.len() {
-                        config.base_handle.metadata.keys[cand_key.1].name.clone()
-                    } else {
-                        config.base_handle.metadata.non_keys
-                            [cand_key.1 - config.base_handle.metadata.keys.len()]
-                        .name
-                        .clone()
-                    };
-                    cand_tuple.push(DataValue::Str(field));
-                }
-                if config.bind_field_idx.is_some() {
-                    cand_tuple.push(if cand_key.2 < 0 {
-                        DataValue::Null
-                    } else {
-                        DataValue::from(cand_key.2 as i64)
-                    });
-                }
-                if config.bind_distance.is_some() {
-                    cand_tuple.push(DataValue::from(distance));
-                }
-                if config.bind_vector.is_some() {
-                    let vec = if cand_key.2 < 0 {
-                        cand_tuple[cand_key.1].clone()
-                    } else {
-                        match &cand_tuple[cand_key.1] {
-                            DataValue::List(v) => v[cand_key.2 as usize].clone(),
-                            v => bail!("corrupted index value {:?}", v),
-                        }
-                    };
-                    cand_tuple.push(vec);
-                }
-
-                if let Some((code, span)) = filter_bytecode {
-                    if !eval_bytecode_pred(code, &cand_tuple, stack, *span)? {
-                        continue;
-                    }
-                }
-
-                ret.push(cand_tuple);
-            }
-            ret.reverse();
-            ret.truncate(config.k);
-
-            Ok(ret)
-        } else {
-            Ok(vec![])
+                    .ok_or_else(|| miette!("corrupted index"))?,
+            };
+            push_search_bindings(&mut row, &cand_key, config, distance)?;
+            ret.push(row);
         }
+        ret.reverse();
+        ret.truncate(config.k);
+
+        Ok(ret)
+    }
+
+    /// The version of the record at `prefix` that is live at `valid_at`, if it has one.
+    fn hnsw_live_version(
+        &self,
+        config: &HnswSearch,
+        prefix: &[DataValue],
+        valid_at: ValidityTs,
+    ) -> Result<Option<DataValue>> {
+        let n_keys = config.base_handle.metadata.keys.len();
+        match config
+            .base_handle
+            .skip_scan_bounded_prefix(self, prefix, &[], &[], valid_at)
+            .next()
+        {
+            None => Ok(None),
+            Some(newest) => Ok(Some(newest?.swap_remove(n_keys - 1))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod expansion_bound_tests {
+    use super::{is_exhausted, may_expand, CompoundKey};
+    use ordered_float::OrderedFloat;
+    use priority_queue::PriorityQueue;
+
+    /// A result set holding the given distances. `found_nn` is a max-queue, so its `peek` is
+    /// the furthest member and `OrderedFloat` ranks a distance that is not a number above
+    /// every real one.
+    fn set_of(dists: &[f64]) -> PriorityQueue<CompoundKey, OrderedFloat<f64>> {
+        let mut q = PriorityQueue::new();
+        for (i, d) in dists.iter().enumerate() {
+            let key: CompoundKey = (vec![crate::DataValue::from(i as i64)], 0, -1);
+            q.push(key, OrderedFloat(*d));
+        }
+        q
+    }
+
+    #[test]
+    fn an_unfilled_set_expands_anything() {
+        let q = set_of(&[1.0]);
+        assert!(may_expand(&q, 4, 99.0), "an unfilled set must not reject");
+        assert!(
+            may_expand(&q, 4, f64::NAN),
+            "nor reject an unmeasurable one"
+        );
+        assert!(
+            !is_exhausted(&q, 4, 99.0),
+            "an unfilled set must not stop the walk"
+        );
+    }
+
+    #[test]
+    fn a_filled_set_expands_only_what_beats_its_furthest() {
+        let q = set_of(&[1.0, 2.0, 3.0]);
+        assert!(may_expand(&q, 3, 2.5), "closer than the furthest");
+        assert!(
+            !may_expand(&q, 3, 3.0),
+            "equal to the furthest is not closer"
+        );
+        assert!(!may_expand(&q, 3, 4.0), "further than the furthest");
+        assert!(is_exhausted(&q, 3, 4.0));
+        assert!(!is_exhausted(&q, 3, 2.5));
+    }
+
+    /// The polarity that matters. Every comparison against a distance that is not a number is
+    /// false, so a test written as `distance < furthest` would reject such a node instead of
+    /// routing through it, and a set holding one as its furthest member would stop admitting
+    /// anything at all: a permanent stall, reported as lost recall and nothing else.
+    #[test]
+    fn an_unmeasurable_distance_neither_is_rejected_nor_stalls_the_walk() {
+        let q = set_of(&[1.0, 2.0, 3.0]);
+        assert!(
+            may_expand(&q, 3, f64::NAN),
+            "an unmeasurable distance must stay routable"
+        );
+        assert!(
+            !is_exhausted(&q, 3, f64::NAN),
+            "an unmeasurable distance must not end the walk"
+        );
+
+        // The same set with an unmeasurable member, which ranks as its furthest.
+        let poisoned = set_of(&[1.0, 2.0, f64::NAN]);
+        assert!(
+            may_expand(&poisoned, 3, 5.0),
+            "a set whose furthest member is unmeasurable must still admit"
+        );
+        assert!(
+            !is_exhausted(&poisoned, 3, 5.0),
+            "a set whose furthest member is unmeasurable must not end the walk"
+        );
     }
 }
 

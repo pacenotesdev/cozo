@@ -1098,7 +1098,6 @@ impl HnswSearchRA {
         }
         let config = self.hnsw_search.clone();
         let filter_code = self.filter_bytecode.clone();
-        let mut stack = vec![];
         let it = self
             .parent
             .iter(tx, delta_rule, stores)?
@@ -1108,7 +1107,7 @@ impl HnswSearchRA {
                     d => bail!("Expected vector, got {:?}", d),
                 };
 
-                let res = tx.hnsw_knn(v, &config, &filter_code, &mut stack)?;
+                let res = tx.hnsw_knn(v, &config, &filter_code)?;
                 Ok(res.into_iter().map(move |t| {
                     let mut r = tuple.clone();
                     r.extend(t);
