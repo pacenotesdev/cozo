@@ -17,12 +17,13 @@ use smartstring::{LazyCompact, SmartString};
 
 use crate::data::expr::Expr;
 use crate::data::symb::Symbol;
-use crate::data::value::DataValue;
+use crate::data::value::{DataValue, Vector};
 use crate::fixed_rule::FixedRulePayload;
 use crate::fts::{TokenizerCache, TokenizerConfig};
 use crate::parse::SourceSpan;
 use crate::runtime::callback::CallbackOp;
 use crate::runtime::db::Poison;
+use crate::NamedRows;
 use crate::{DbInstance, FixedRule, RegularTempStore, ScriptMutability};
 
 #[test]
@@ -1063,6 +1064,254 @@ fn test_insertions() {
     for row in res.into_json()["rows"].as_array().unwrap() {
         println!("{} {}", row[0], row[1]);
     }
+}
+
+/// Twenty-five points along a diagonal, with an HNSW index over them.
+fn line_db() -> DbInstance {
+    let db = DbInstance::new("mem", "", "").unwrap();
+    db.run_default(":create pt {k: Int => v: <F32; 2>}")
+        .unwrap();
+    db.run_default("?[k, v] := k in int_range(25), v = vec([k, k]) :put pt {k => v}")
+        .unwrap();
+    db.run_default(
+        "::hnsw create pt:i {fields: [v], dim: 2, dtype: F32, m: 16, ef_construction: 20}",
+    )
+    .unwrap();
+    db
+}
+
+fn ints(rows: NamedRows) -> Vec<i64> {
+    rows.rows
+        .iter()
+        .map(|r| r[0].get_int().unwrap())
+        .collect_vec()
+}
+
+/// A search asked for `k` results returns `k` whenever `k` of them pass the filter, however
+/// few of the nearest `ef` do. The filter selects three points far from the probe, so a search
+/// that only sifts the candidates it happened to collect first comes back empty.
+#[test]
+fn hnsw_filter_does_not_truncate_the_result() {
+    let db = line_db();
+    for ef in [3, 5, 50] {
+        let found = ints(
+            db.run_default(&format!(
+                "?[k] := ~pt:i{{k | query: q, k: 3, ef: {ef}, \
+                 filter: k == 20 || k == 22 || k == 24}}, q = vec([0.0, 0.0])"
+            ))
+            .unwrap(),
+        );
+        assert_eq!(found, vec![20, 22, 24], "ef {ef} returned {found:?}");
+    }
+}
+
+/// A radius still cuts what a search returns, and still does so over results the filter had to
+/// walk past its `ef` nearest nodes to find.
+#[test]
+fn hnsw_radius_and_filter_compose() {
+    let db = line_db();
+    // Squared L2 along the diagonal: point k sits at distance 2*k*k from the origin, so the
+    // radius admits everything up to k = 10 and nothing beyond it.
+    let found = ints(
+        db.run_default(
+            "?[k] := ~pt:i{k | query: q, k: 5, ef: 3, radius: 200.0, \
+             filter: k == 8 || k == 10 || k == 12}, q = vec([0.0, 0.0])",
+        )
+        .unwrap(),
+    );
+    assert_eq!(found, vec![8, 10], "got {found:?}");
+}
+
+/// Without `validity` every version of a record is its own node, so a search over a
+/// time-travelling relation ranks superseded and retracted versions alongside current ones.
+#[test]
+fn hnsw_ranks_every_version_without_a_validity() {
+    let db = DbInstance::new("mem", "", "").unwrap();
+    db.run_default(":create doc {id: String, at: Validity => v: <F32; 2>}")
+        .unwrap();
+    db.run_default(
+        "?[id, at, v] <- [['a', 'ASSERT', [1.0, 1.0]], ['b', 'ASSERT', [2.0, 2.0]]] \
+         :put doc {id, at => v}",
+    )
+    .unwrap();
+    db.run_default(
+        "::hnsw create doc:i {fields: [v], dim: 2, dtype: F32, m: 16, ef_construction: 20}",
+    )
+    .unwrap();
+    // Supersede `a`, then retract `b`.
+    db.run_default("?[id, at, v] <- [['a', 'ASSERT', [1.5, 1.5]]] :put doc {id, at => v}")
+        .unwrap();
+    db.run_default("?[id, at, v] <- [['b', 'RETRACT', [2.0, 2.0]]] :put doc {id, at => v}")
+        .unwrap();
+
+    // Binding the validity as well, because projecting to the id alone would collapse the
+    // versions of one record into a single row and hide exactly what this is measuring.
+    let all = db
+        .run_default("?[id, at] := ~doc:i{id, at | query: q, k: 10, ef: 50}, q = vec([1.0, 1.0])")
+        .unwrap();
+    assert_eq!(all.rows.len(), 4, "expected one node per version");
+
+    // Binding the vector too: `a` has two assertions and only the later one is live, so this
+    // pins down *which* version came back and not merely how many did. Liveness is memoised
+    // per record, and a memo that returned the wrong version would pass the count assertion.
+    let live = db
+        .run_default(
+            "?[id, v] := ~doc:i{id, v | query: q, k: 10, ef: 50, validity: 'NOW'}, \
+             q = vec([1.0, 1.0])",
+        )
+        .unwrap();
+    assert_eq!(live.rows.len(), 1, "got {:?}", live.rows);
+    assert_eq!(
+        live.rows[0][0].get_str().unwrap(),
+        "a",
+        "retracted and superseded versions leaked"
+    );
+    assert_eq!(
+        live.rows[0][1],
+        DataValue::Vec(Vector::F32(ndarray::arr1(&[1.5f32, 1.5f32]))),
+        "the superseded version of `a` came back instead of the live one"
+    );
+}
+
+/// Liveness is asked during the walk, so it costs no results: `k` live records come back even
+/// when the nodes nearest the probe are all dead.
+#[test]
+fn hnsw_validity_does_not_truncate_the_result() {
+    let db = DbInstance::new("mem", "", "").unwrap();
+    db.run_default(":create doc {id: Int, at: Validity => v: <F32; 2>}")
+        .unwrap();
+    db.run_default("?[id, at, v] := id in int_range(25), at = 'ASSERT', v = vec([id, id]) :put doc {id, at => v}")
+        .unwrap();
+    db.run_default(
+        "::hnsw create doc:i {fields: [v], dim: 2, dtype: F32, m: 16, ef_construction: 20}",
+    )
+    .unwrap();
+    // Retract everything but the three furthest from the probe.
+    db.run_default(
+        "?[id, at, v] := *doc{id, v @ 'NOW'}, id < 22, at = 'RETRACT' :put doc {id, at => v}",
+    )
+    .unwrap();
+
+    let found = ints(
+        db.run_default(
+            "?[id] := ~doc:i{id | query: q, k: 3, ef: 5, validity: 'NOW'}, q = vec([0.0, 0.0])",
+        )
+        .unwrap(),
+    );
+    assert_eq!(found, vec![22, 23, 24], "got {found:?}");
+}
+
+/// A vector the distance function cannot measure must not stall the search.
+///
+/// A zero vector under cosine distance divides zero by zero, so every distance to it is NaN,
+/// and `OrderedFloat` ranks that above every real distance: once such a node is in the result
+/// set it is the furthest member, and the expansion test compares against it. Every comparison
+/// against NaN is false, so a test written as `distance < furthest` admits nothing from that
+/// point on. The node is then never evicted either, because eviction only happens on a push,
+/// so the walk stalls permanently where it stood. The only symptom is lost recall.
+///
+/// Two things make this observable. `ef` stays well under the number of points, so the result
+/// set genuinely fills and its furthest member decides admission. And recall is measured over
+/// many neighbours rather than the single nearest, because a greedy walk reaches the nearest
+/// first and would answer `k: 1` correctly even from a stalled search.
+#[test]
+fn an_unmeasurable_distance_does_not_stall_the_search() {
+    let db = DbInstance::new("mem", "", "").unwrap();
+    db.run_default(":create pts {id: Int => v: <F32; 2>}")
+        .unwrap();
+
+    let n = 300i64;
+    let at = |i: i64| {
+        let t = (i as f64) * std::f64::consts::TAU / (n as f64);
+        (t.cos(), t.sin())
+    };
+    let rows: Vec<String> = (1..=n)
+        .map(|i| {
+            let (x, y) = at(i);
+            format!("[{i},[{x:.6},{y:.6}]]")
+        })
+        .collect();
+    db.run_default(&format!(
+        "?[id, v] <- [{}] :put pts {{id => v}}",
+        rows.join(",")
+    ))
+    .unwrap();
+    // Several unmeasurable ones, at negative ids. More than one because whether a stall
+    // happens depends on one of them sitting in the result set at the moment it first reaches
+    // `ef`, which is a coin toss per query; several raise that odds enough to measure.
+    let zeros: Vec<String> = (1..=150).map(|z| format!("[{},[0.0,0.0]]", -z)).collect();
+    db.run_default(&format!(
+        "?[id, v] <- [{}] :put pts {{id => v}}",
+        zeros.join(",")
+    ))
+    .unwrap();
+    db.run_default(
+        "::hnsw create pts:i {dim: 2, m: 16, dtype: F32, fields: [v], distance: Cosine, \
+         ef_construction: 50}",
+    )
+    .unwrap();
+
+    // No precondition asserting the unmeasurable node appears in a result: working behaviour
+    // evicts it. It ranks above every real distance, so it is the first thing dropped whenever
+    // the result set overflows `ef`, and it only lingers while the set is short of `ef` --
+    // which is exactly the window in which a stalling comparison would freeze the walk and
+    // then never evict it, because eviction only happens on a push. Recall is the signal.
+
+    // Recall over the 50 true nearest, from several places on the ring.
+    let k = 50usize;
+    let mut hits = 0usize;
+    let mut total = 0usize;
+    // Many probes, so the per-query coin toss averages out into a stable figure.
+    for probe in (1..=n).step_by(3) {
+        let (qx, qy) = at(probe);
+        let mut truth: Vec<(i64, f64)> = (1..=n)
+            .map(|i| {
+                let (x, y) = at(i);
+                // Cosine distance between unit vectors reduces to 1 - the dot product.
+                (i, 1.0 - (qx * x + qy * y))
+            })
+            .collect();
+        truth.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let truth: std::collections::HashSet<i64> = truth[..k].iter().map(|(i, _)| *i).collect();
+
+        let got = db
+            .run_default(&format!(
+                "?[id, dist] := ~pts:i{{id | query: q, k: {k}, ef: 128, bind_distance: dist}}, \
+                 q = vec([{qx:.6},{qy:.6}])"
+            ))
+            .unwrap();
+        hits += got
+            .rows
+            .iter()
+            .filter(|r| r[0].get_int().map_or(false, |id| truth.contains(&id)))
+            .count();
+        total += k;
+    }
+    let recall = hits as f64 / total as f64;
+    // A stalled walk returns whatever the descent happened to be holding, far below this.
+    // Recall varies between builds because the level of each node is drawn at random, so the
+    // threshold is set from both measured distributions rather than from the ideal. Over eight
+    // builds an intact walk ranged 0.915 to 0.991; with the comparison written so that an
+    // unmeasurable distance stalls it, five builds ranged 0.341 to 0.565. 0.8 sits in the gap.
+    assert!(
+        recall >= 0.8,
+        "recall collapsed around the unmeasurable vectors: {recall:.3} ({hits}/{total})"
+    );
+}
+
+/// `validity` only means something where there is a validity column to read.
+#[test]
+fn hnsw_validity_needs_a_validity_column() {
+    let db = line_db();
+    let err = db
+        .run_default(
+            "?[k] := ~pt:i{k | query: q, k: 3, ef: 5, validity: 'NOW'}, q = vec([0.0, 0.0])",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("no validity column"),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]
