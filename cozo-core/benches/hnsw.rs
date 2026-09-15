@@ -40,6 +40,9 @@ extern crate test;
 use cozo::{DataValue, DbInstance, NamedRows, ScriptMutability, Vector};
 use lazy_static::lazy_static;
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Instant;
 use test::Bencher;
 
@@ -64,6 +67,13 @@ fn ef_construction() -> usize {
 }
 fn n_queries() -> usize {
     env_usize("COZO_HNSW_QUERIES", 100)
+}
+
+/// Index construction is single-threaded on this engine, and the build benchmarks rebuild from
+/// scratch on every iteration, so they get their own size. Raising `COZO_HNSW_N` to make the
+/// query benchmarks realistic would otherwise make the build ones take hours.
+fn build_n() -> usize {
+    env_usize("COZO_HNSW_BUILD_N", 2000).min(n_vectors())
 }
 
 /// A deterministic stream, so a run is reproducible and two runs of different engine code see
@@ -117,15 +127,52 @@ fn make_vectors(n: usize, dim: usize, shape: Shape, seed: u64) -> Vec<Vec<f32>> 
         .collect()
 }
 
-fn new_db() -> DbInstance {
+/// A database together with the temporary directory backing it, for the on-disk engines. The
+/// directory has to outlive the `DbInstance`, so the guard is kept here rather than in the
+/// constructor's stack frame; dropping the store removes it. Derefs to the database, so callers
+/// that only want to run scripts need not know which engine they got.
+struct Store {
+    db: DbInstance,
+    _dir: Option<tempfile::TempDir>,
+}
+
+impl std::ops::Deref for Store {
+    type Target = DbInstance;
+
+    fn deref(&self) -> &DbInstance {
+        &self.db
+    }
+}
+
+/// Every on-disk store this benchmark opens goes under one directory, which is emptied when the
+/// first store is opened. Dropping a `Store` already removes its own directory, but the fixtures
+/// below are `lazy_static`, and Rust does not drop statics at exit: without a sweep their stores
+/// would accumulate one set per run. Two copies of this benchmark running at once would clear
+/// each other's stores, which `cargo bench` does not do.
+fn store_root() -> &'static Path {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let root = std::env::temp_dir().join("cozo-hnsw-bench");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    })
+}
+
+fn new_db() -> Store {
     match std::env::var("COZO_HNSW_ENGINE").unwrap_or_else(|_| "mem".into()).as_str() {
-        "mem" => DbInstance::new("mem", "", "").unwrap(),
+        "mem" => Store {
+            db: DbInstance::new("mem", "", "").unwrap(),
+            _dir: None,
+        },
         engine => {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempfile::Builder::new().tempdir_in(store_root()).unwrap();
             let path = dir.path().join("db");
-            // Leaked on purpose: the directory has to outlive the benchmark that opened it.
-            std::mem::forget(dir);
-            DbInstance::new(engine, path.to_str().unwrap(), "").unwrap()
+            let db = DbInstance::new(engine, path.to_str().unwrap(), "").unwrap();
+            Store {
+                db,
+                _dir: Some(dir),
+            }
         }
     }
 }
@@ -137,7 +184,7 @@ fn run(db: &DbInstance, script: &str) -> NamedRows {
 
 /// A store holding `vectors` under `pts`, with no index yet. Bulk-loaded, because building the
 /// rows through the parser would dominate what is being measured.
-fn load(vectors: &[Vec<f32>]) -> DbInstance {
+fn load(vectors: &[Vec<f32>]) -> Store {
     let db = new_db();
     run(&db, &format!(":create pts {{id: Int => v: <F32; {}>}}", dim()));
     let rows = vectors
@@ -181,15 +228,24 @@ fn vec_literal(v: &[f32]) -> String {
     format!("vec([{body}])")
 }
 
+/// The query vector is bound as a parameter rather than formatted into the script. Inlining it
+/// means re-parsing `dim` floats of text per query, which on a 64-dimension vector costs more
+/// than the search does: the benchmark would be measuring the parser.
 fn knn(db: &DbInstance, q: &[f32], k: usize, ef: usize, extra: &str) -> Vec<i64> {
-    run(
-        db,
+    let mut params = BTreeMap::new();
+    params.insert(
+        "q".to_string(),
+        DataValue::Vec(Vector::F32(ndarray::arr1(q))),
+    );
+    db.run_script(
         &format!(
-            "?[id, dist] := ~pts:i{{id | query: q, k: {k}, ef: {ef}, bind_distance: dist{extra}}}, \
-             q = {} :order dist",
-            vec_literal(q)
+            "?[id, dist] := ~pts:i{{id | query: $q, k: {k}, ef: {ef}, bind_distance: dist{extra}}} \
+             :order dist"
         ),
+        params,
+        ScriptMutability::Immutable,
     )
+    .unwrap_or_else(|e| panic!("query failed: {e:?}"))
     .rows
     .iter()
     .map(|r| r[0].get_int().unwrap())
@@ -236,22 +292,22 @@ lazy_static! {
         make_vectors(n_vectors(), dim(), Shape::Clustered, 0x5EED);
     static ref QUERIES: Vec<Vec<f32>> = query_set(&UNIFORM);
     /// One indexed store per distance, reused by every query benchmark.
-    static ref L2_DB: DbInstance = {
+    static ref L2_DB: Store = {
         let db = load(&UNIFORM);
         create_index(&db, "L2");
         db
     };
-    static ref COSINE_DB: DbInstance = {
+    static ref COSINE_DB: Store = {
         let db = load(&UNIFORM);
         create_index(&db, "Cosine");
         db
     };
-    static ref IP_DB: DbInstance = {
+    static ref IP_DB: Store = {
         let db = load(&UNIFORM);
         create_index(&db, "IP");
         db
     };
-    static ref CLUSTERED_DB: DbInstance = {
+    static ref CLUSTERED_DB: Store = {
         let db = load(&CLUSTERED);
         create_index(&db, "L2");
         db
@@ -262,8 +318,9 @@ lazy_static! {
 
 #[bench]
 fn build_l2(b: &mut Bencher) {
+    let data = &UNIFORM[..build_n()];
     b.iter(|| {
-        let db = load(&UNIFORM);
+        let db = load(data);
         create_index(&db, "L2");
         db
     });
@@ -271,8 +328,9 @@ fn build_l2(b: &mut Bencher) {
 
 #[bench]
 fn build_cosine(b: &mut Bencher) {
+    let data = &UNIFORM[..build_n()];
     b.iter(|| {
-        let db = load(&UNIFORM);
+        let db = load(data);
         create_index(&db, "Cosine");
         db
     });
@@ -280,8 +338,9 @@ fn build_cosine(b: &mut Bencher) {
 
 #[bench]
 fn build_clustered(b: &mut Bencher) {
+    let data = &CLUSTERED[..build_n()];
     b.iter(|| {
-        let db = load(&CLUSTERED);
+        let db = load(data);
         create_index(&db, "L2");
         db
     });
@@ -407,10 +466,11 @@ fn report_recall_vs_ef_clustered(_b: &mut Bencher) {
 fn report_recall_spread(_b: &mut Bencher) {
     println!("\nrecall@10 at ef=64 across repeated builds of identical data");
     let mut seen: Vec<f64> = vec![];
+    let data = &UNIFORM[..build_n()];
     for round in 0..5 {
-        let db = load(&UNIFORM);
+        let db = load(data);
         create_index(&db, "L2");
-        let recall = recall_at(&db, &UNIFORM, &QUERIES, 10, 64);
+        let recall = recall_at(&db, data, &QUERIES, 10, 64);
         seen.push(recall);
         println!("  build {round}: recall={recall:.4}");
     }
@@ -464,8 +524,8 @@ fn report_filtered_recall(_b: &mut Bencher) {
 #[bench]
 fn report_build_scaling(_b: &mut Bencher) {
     println!("\nbuild time against index size (dim={}, m={})", dim(), m());
-    let mut size = 250usize.min(n_vectors());
-    while size <= n_vectors() {
+    let mut size = 250usize.min(build_n());
+    while size <= build_n() {
         let subset: Vec<Vec<f32>> = UNIFORM[..size].to_vec();
         let db = load(&subset);
         let started = Instant::now();
@@ -476,5 +536,53 @@ fn report_build_scaling(_b: &mut Bencher) {
             elapsed / size as u32
         );
         size *= 2;
+    }
+}
+
+/// Concurrent query throughput, which is the number that matters for a served index: searches
+/// are independent and share an immutable graph, so this is the surface under load.
+///
+/// Reported against thread count so the scaling is visible rather than implied. Perfect
+/// scaling would be `threads x` the single-threaded rate; the gap is contention, and on this
+/// engine the candidates are the storage transaction taken per query and the per-neighbour
+/// point lookups into the base relation.
+///
+/// Latency is reported alongside, because the two move in opposite directions under load: a
+/// saturated pool can raise throughput while every individual query gets slower.
+#[bench]
+fn report_query_throughput(_b: &mut Bencher) {
+    use rayon::prelude::*;
+
+    let db: &DbInstance = &L2_DB;
+    let total = env_usize("COZO_HNSW_THROUGHPUT_QUERIES", 4000);
+    println!(
+        "\nquery throughput, k=10 ef=64 (n={}, dim={}, {total} queries per point)",
+        n_vectors(),
+        dim()
+    );
+    let mut single: Option<f64> = None;
+    for threads in [1usize, 2, 4, 8, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        // Warm the pool so thread spawn is not inside the measurement.
+        pool.install(|| (0..threads).into_par_iter().for_each(|_| {}));
+        let started = Instant::now();
+        pool.install(|| {
+            (0..total).into_par_iter().for_each(|i| {
+                let q = &QUERIES[i % QUERIES.len()];
+                let got = knn(db, q, 10, 64, "");
+                assert!(!got.is_empty(), "a query returned nothing");
+            });
+        });
+        let elapsed = started.elapsed();
+        let qps = total as f64 / elapsed.as_secs_f64();
+        let base = *single.get_or_insert(qps);
+        println!(
+            "  threads={threads:<3} {qps:>9.0} q/s   {:>9?}/query   scaling={:.2}x of ideal",
+            elapsed / total as u32,
+            qps / (base * threads as f64)
+        );
     }
 }
