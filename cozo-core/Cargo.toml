@@ -28,13 +28,10 @@ minimal = ["storage-sqlite", "storage-sqlite-src"]
 ## but does not support much concurrency.
 storage-sqlite = ["dep:sqlite"]
 storage-sqlite-src = ["dep:sqlite3-src", "sqlite3-src/bundled"]
-## Enables the [RocksDB](http://rocksdb.org/) backend.
-## Cannot be combined with `storage-new-rocksdb` or `storage-layered`: those link a second,
-## separately built RocksDB, and two static copies in one binary export the same symbols.
-## RocksDB is hard to compile on some platforms, uses more resources than SQLite,
-## but is very performant and supports an extremely high level of concurrency.
-## You can also [fine-tune](https://github.com/cozodb/cozo/blob/main/TUNING_ROCKSDB.md) RocksDB options.
-storage-rocksdb = ["dep:cozorocks"]
+## The legacy RocksDB backend, built from the vendored `cozorocks` crate. Disconnected from
+## the build: the feature is kept so downstream crates that forward it still resolve, but
+## enabling it is a compile error. Use `storage-new-rocksdb` or `storage-layered` instead.
+storage-rocksdb = []
 storage-new-rocksdb = ["dep:rocksdb"]
 ## Enables the layered RocksDB backend: named storage layers composed into a stack per query,
 ## for copy-on-write forks of a database.
@@ -44,9 +41,10 @@ graph-algo = ["graph", "rayon"]
 ## Allows the utilities to make web requests to fetch data.
 requests = ["dep:minreq"]
 ## Uses jemalloc as the global allocator, can make a difference in performance.
-jemalloc = ["dep:tikv-jemallocator-global", "cozorocks?/jemalloc"]
-## Enables io-uring option for the RocksDB storage
-io-uring = ["cozorocks?/io-uring"]
+jemalloc = ["dep:tikv-jemallocator-global"]
+## Configured io-uring for the legacy RocksDB backend; has no effect while that backend is
+## disconnected.
+io-uring = []
 ## Polyfills for the WASM target
 wasm = ["uuid/js", "dep:js-sys"]
 
@@ -123,8 +121,7 @@ document-features = "0.2.8"
 rayon = { version = "1.10.0", optional = true }
 minreq = { version = "2.11.2", features = ["https-rustls"], optional = true }
 tikv-jemallocator-global = { version = "0.5.0", optional = true }
-cozorocks = { path = "../cozorocks", version = "0.1.7", optional = true }
-rocksdb = { version = "0.22.0", optional = true }
+rocksdb = { version = "0.25.0", optional = true }
 sled = { version = "0.34.7", optional = true }
 tikv-client = { version = "0.3.0", optional = true }
 tokio = { version = "1.37.0", optional = true }

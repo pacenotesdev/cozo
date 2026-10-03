@@ -13,6 +13,12 @@ use crate::data::tuple::Tuple;
 use crate::data::value::ValidityTs;
 use crate::decode_tuple_from_kv;
 
+#[cfg(feature = "storage-rocksdb")]
+compile_error!(
+    "feature `storage-rocksdb` is disconnected from the build: its `cozorocks` bridge is no \
+     longer a dependency. Use `storage-new-rocksdb` or `storage-layered`"
+);
+
 // `storage-rocksdb` links a RocksDB built from the vendored submodule through `cozorocks`.
 // `storage-new-rocksdb` and `storage-layered` link a second one through `librocksdb-sys`. Both
 // are static, both export the same C++ symbols, and they are built from different RocksDB
