@@ -145,3 +145,31 @@ swapvec = "0.3.0"
 
 [dev-dependencies]
 tempfile = "3.14.0"
+criterion = "0.8.2"
+
+# Criterion benches, plus a scenario binary per suite for the measurements that are not
+# per-iteration timings: load tests and tables that print their own results. Both kinds need
+# `harness = false`, or Cargo links libtest and its `main` collides with theirs.
+[[bench]]
+name = "pokec"
+harness = false
+
+[[bench]]
+name = "pokec_scenarios"
+harness = false
+
+[[bench]]
+name = "wiki_pagerank"
+harness = false
+
+[[bench]]
+name = "time_travel"
+harness = false
+
+[[bench]]
+name = "hnsw"
+harness = false
+
+[[bench]]
+name = "hnsw_report"
+harness = false
