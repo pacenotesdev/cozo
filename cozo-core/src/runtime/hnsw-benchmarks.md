@@ -20,9 +20,12 @@ At these sizes the whole dataset is resident in page cache, on both engines.
 ## Method
 
 Every figure is the median of three runs of the whole suite, six runs in total. Latencies come
-from the libtest harness (`ns/iter`); the `report_*` functions measure rather than time and
-print their own tables. The `+/-` column is the harness's own spread within a run, not the
-spread between runs.
+from the libtest harness (`ns/iter`) on a nightly toolchain, before the benches moved to
+Criterion; the `report_*` functions measure rather than time and print their own tables. The
+`+/-` column is the harness's own spread within a run, not the spread between runs.
+
+The `rocksdb` columns are the legacy `rocksdb` engine (the `cozorocks` backend), which has
+since been disconnected from the build. They are not figures for `newrocksdb`.
 
 ### Parameters
 
@@ -45,8 +48,7 @@ vectors; the clustered dataset is 16 centroids with 0.15 jitter.
 
 ## Search latency
 
-Median ns/iter, converted to milliseconds. One iteration is `COZO_HNSW_QUERIES` = 100 queries,
-so divide by 100 for per-query cost.
+Median ns/iter, converted to milliseconds. One iteration is one query.
 
 | Benchmark | mem | rocksdb | ratio |
 |---|---:|---:|---:|
@@ -77,8 +79,9 @@ are k=10, ef=64. `search_radius` is k=10, ef=64 with `radius: 1.6`.
 | `build_clustered` (2000 vectors) | 709.678 ms +/- 13.97 | 1936.216 ms +/- 49.92 | 2.73x |
 | `insert_one_into_an_existing_index` | 4.175 ms +/- 0.41 | 6.439 ms +/- 0.72 | 1.54x |
 
-`insert_one_into_an_existing_index` adds a single vector to an index already holding
-`COZO_HNSW_BUILD_N` = 2000.
+`insert_one_into_an_existing_index` adds a single vector to an index built over
+`COZO_HNSW_N` = 10000 vectors. Rows were not removed between iterations, so the index grew by
+one row per iteration over the run.
 
 ### Build scaling
 
@@ -154,7 +157,10 @@ perfect multiple of the single-thread rate.
 | 8 | 2811 | 0.87x | 1317 | 0.77x |
 | 16 | 3254 | 0.50x | 1390 | 0.41x |
 
-## Reproducing
+## Producing
+
+The figures above were produced with the libtest harness, which no longer exists in this tree.
+The same parameters under the current harness:
 
 ```
 cd cozo-core
@@ -162,10 +168,16 @@ export COZO_HNSW_N=10000 COZO_HNSW_BUILD_N=2000 COZO_HNSW_DIM=64 \
        COZO_HNSW_M=16 COZO_HNSW_EF_C=50 \
        COZO_HNSW_QUERIES=100 COZO_HNSW_THROUGHPUT_QUERIES=4000
 
-COZO_HNSW_ENGINE=mem     cargo bench --bench hnsw -- --nocapture
-COZO_HNSW_ENGINE=rocksdb cargo bench --features storage-rocksdb --bench hnsw -- --nocapture
+# timings (Criterion)
+COZO_HNSW_ENGINE=mem        cargo bench --bench hnsw
+COZO_HNSW_ENGINE=newrocksdb cargo bench --features storage-new-rocksdb --bench hnsw
+
+# recall, scaling and throughput tables
+COZO_HNSW_ENGINE=mem        cargo bench --bench hnsw_report
+COZO_HNSW_ENGINE=newrocksdb cargo bench --features storage-new-rocksdb --bench hnsw_report
 ```
 
-A full suite is about 27 minutes on `mem` and about 69 minutes on `rocksdb`. The benchmarks
-require a nightly toolchain for the `test` harness. On-disk engines put their stores under
-`$TMPDIR/cozo-hnsw-bench`, which is emptied at the start of each run.
+Under the current harness the insert benchmark removes its row after each iteration, so the
+index does not grow, and build iterations drop their store outside the timed region. On-disk
+engines put their stores under `$TMPDIR/cozo-hnsw-bench`, which is emptied at the start of
+each run.

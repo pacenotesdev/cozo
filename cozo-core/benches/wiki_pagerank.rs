@@ -6,17 +6,14 @@
  * You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-#![feature(test)]
-
-extern crate test;
-
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::time::Instant;
 use std::{env, io};
-use test::Bencher;
+
+use criterion::{criterion_group, criterion_main, Criterion};
 
 use lazy_static::{initialize, lazy_static};
 
@@ -68,28 +65,37 @@ lazy_static! {
     };
 }
 
-#[bench]
-fn wikipedia_pagerank(b: &mut Bencher) {
-    initialize(&TEST_DB);
-    b.iter(|| {
-        TEST_DB
-            .run_script("?[id, rank] <~ PageRank(*article[])", Default::default(), ScriptMutability::Immutable)
-            .unwrap()
+fn wikipedia(c: &mut Criterion) {
+    let mut g = c.benchmark_group("wikipedia");
+    // Each iteration is a whole-graph algorithm over the link dump; the default 100 samples
+    // would take a very long time.
+    g.sample_size(10);
+    g.bench_function("pagerank", |b| {
+        initialize(&TEST_DB);
+        b.iter(|| {
+            TEST_DB
+                .run_script(
+                    "?[id, rank] <~ PageRank(*article[])",
+                    Default::default(),
+                    ScriptMutability::Immutable,
+                )
+                .unwrap()
+        })
     });
+    g.bench_function("louvain", |b| {
+        initialize(&TEST_DB);
+        b.iter(|| {
+            TEST_DB
+                .run_script(
+                    "?[grp, idx] <~ CommunityDetectionLouvain(*article[])",
+                    Default::default(),
+                    ScriptMutability::Immutable,
+                )
+                .unwrap()
+        })
+    });
+    g.finish();
 }
 
-#[bench]
-fn wikipedia_louvain(b: &mut Bencher) {
-    initialize(&TEST_DB);
-    b.iter(|| {
-        let start = Instant::now();
-        TEST_DB
-            .run_script(
-                "?[grp, idx] <~ CommunityDetectionLouvain(*article[])",
-                Default::default(),
-                ScriptMutability::Immutable,
-            )
-            .unwrap();
-        dbg!(start.elapsed());
-    })
-}
+criterion_group!(benches, wikipedia);
+criterion_main!(benches);

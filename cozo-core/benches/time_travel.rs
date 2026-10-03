@@ -6,19 +6,14 @@
  *  You can obtain one at https://mozilla.org/MPL/2.0/.
  *
  */
-#![feature(test)]
-
-extern crate test;
-
 use cozo::{DataValue, DbInstance, NamedRows, Validity, ScriptMutability};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Bencher, Criterion, Throughput};
 use itertools::Itertools;
 use lazy_static::{initialize, lazy_static};
 use rand::Rng;
 use rayon::prelude::*;
-use std::cmp::max;
 use std::collections::BTreeMap;
 use std::time::Instant;
-use test::Bencher;
 
 fn insert_data(db: &DbInstance) {
     let insert_plain_time = Instant::now();
@@ -115,8 +110,9 @@ fn insert_data(db: &DbInstance) {
 
 lazy_static! {
     static ref TEST_DB: DbInstance = {
+        // Needs `--features storage-new-rocksdb` to run.
         let db_path = "_time_travel_rocks.db";
-        let db = DbInstance::new("rocksdb", db_path, "").unwrap();
+        let db = DbInstance::new("newrocksdb", db_path, "").unwrap();
 
         let create_res = db.run_script(
             r#"
@@ -226,60 +222,65 @@ fn single_tt_travel_read(k: usize) {
         .unwrap();
 }
 
-#[bench]
-fn time_travel_init(_: &mut Bencher) {
+/// History depths: each `ttN` relation holds `N` versions of every key.
+const DEPTHS: [usize; 4] = [1, 10, 100, 1000];
+
+/// Point reads per sample in `point_read`, spread across the rayon pool.
+const READ_BATCH: usize = 100_000;
+
+fn parallel_reads(b: &mut Bencher, f: impl Fn() + Sync) {
     initialize(&TEST_DB);
-
-    let count = 100_000;
-    let qps_single_plain_time = Instant::now();
-    (0..count).into_par_iter().for_each(|_| {
-        single_plain_read();
-    });
-    dbg!((count as f64) / qps_single_plain_time.elapsed().as_secs_f64());
-
-    for k in [1, 10, 100, 1000] {
-        let count = 100_000;
-        let qps_single_tt_time = Instant::now();
-        (0..count).into_par_iter().for_each(|_| {
-            single_tt_read(k);
-        });
-        dbg!(k);
-        dbg!((count as f64) / qps_single_tt_time.elapsed().as_secs_f64());
-    }
-
-    for k in [1, 10, 100, 1000] {
-        let count = 100_000;
-        let qps_single_tt_travel_time = Instant::now();
-        (0..count).into_par_iter().for_each(|_| {
-            single_tt_travel_read(k);
-        });
-        dbg!(k);
-        dbg!((count as f64) / qps_single_tt_travel_time.elapsed().as_secs_f64());
-    }
-
-    let count = 100;
-
-    let plain_aggr_time = Instant::now();
-    (0..count).for_each(|_| {
-        plain_aggr();
-    });
-    dbg!(plain_aggr_time.elapsed().as_secs_f64() * 1000. / (count as f64));
-
-    for k in [1, 10, 100, 1000] {
-        let count = max(1000 / k, 5);
-        let tt_stupid_aggr_time = Instant::now();
-        (0..count).for_each(|_| {
-            tt_stupid_aggr(k);
-        });
-        dbg!(k);
-        dbg!(tt_stupid_aggr_time.elapsed().as_secs_f64() * 1000. / (count as f64));
-
-        let count = 20;
-        let tt_travel_aggr_time = Instant::now();
-        (0..count).for_each(|_| {
-            tt_travel_aggr(k);
-        });
-        dbg!(k);
-        dbg!(tt_travel_aggr_time.elapsed().as_secs_f64() * 1000. / (count as f64));
-    }
+    b.iter_custom(|iters| {
+        let start = Instant::now();
+        for _ in 0..iters {
+            (0..READ_BATCH).into_par_iter().for_each(|_| f());
+        }
+        start.elapsed()
+    })
 }
+
+/// Point-read throughput against history depth: the plain relation, the latest version found
+/// by aggregation, and the latest version found by time travel.
+fn point_reads(c: &mut Criterion) {
+    let mut g = c.benchmark_group("point_read");
+    // Each sample is a whole parallel batch.
+    g.sample_size(10);
+    g.throughput(Throughput::Elements(READ_BATCH as u64));
+    g.bench_function("plain", |b| parallel_reads(b, single_plain_read));
+    for k in DEPTHS {
+        g.bench_with_input(BenchmarkId::new("tt", k), &k, |b, &k| {
+            parallel_reads(b, || single_tt_read(k))
+        });
+    }
+    for k in DEPTHS {
+        g.bench_with_input(BenchmarkId::new("tt_travel", k), &k, |b, &k| {
+            parallel_reads(b, || single_tt_travel_read(k))
+        });
+    }
+    g.finish();
+}
+
+/// Whole-relation aggregation latency against history depth, by the same two routes.
+fn aggregations(c: &mut Criterion) {
+    let mut g = c.benchmark_group("aggregation");
+    // The deep relations scan millions of versions per iteration.
+    g.sample_size(10);
+    g.bench_function("plain", |b| {
+        initialize(&TEST_DB);
+        b.iter(plain_aggr)
+    });
+    for k in DEPTHS {
+        g.bench_with_input(BenchmarkId::new("tt_stupid", k), &k, |b, &k| {
+            initialize(&TEST_DB);
+            b.iter(|| tt_stupid_aggr(k))
+        });
+        g.bench_with_input(BenchmarkId::new("tt_travel", k), &k, |b, &k| {
+            initialize(&TEST_DB);
+            b.iter(|| tt_travel_aggr(k))
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(benches, point_reads, aggregations);
+criterion_main!(benches);
